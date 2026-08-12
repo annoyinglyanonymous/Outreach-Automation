@@ -1,0 +1,75 @@
+{
+  "name": "Outreach — LLM JSON (OpenAI)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "llm-json",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "a1b2c3d4-0001-4000-8000-00000000ffff"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: \"gpt-4o-mini\",\n  messages: [\n    { role: \"system\", content: $json.body.system },\n    { role: \"user\", content: $json.body.user }\n  ],\n  response_format: { type: \"json_object\" },\n  temperature: 0.7\n}) }}",
+        "options": {
+          "timeout": 55000
+        }
+      },
+      "id": "a1b2c3d4-0002-4000-8000-000000000002",
+      "name": "OpenAI Chat",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Accept any shape n8n LLM nodes produce (raw HTTP Request to Chat\n// Completions, or the native 'Message a model' node), parse the\n// model's JSON, hand it back verbatim. On junk, answer with the\n// {error} shape the app treats as a provider failure.\nconst j = $json;\nconst fromResponses = Array.isArray(j.output)\n  ? j.output.flatMap(o => o.content ?? []).find(c => c.text)?.text\n  : undefined;\nlet content =\n  j.choices?.[0]?.message?.content\n  ?? fromResponses\n  ?? j.message?.content\n  ?? j.output_text\n  ?? j.text;\ntry {\n  if (content && typeof content === 'object') return [{ json: content }];\n  return [{ json: JSON.parse(content) }];\n} catch (e) {\n  return [{ json: { error: `unparseable model output: ${String(content).slice(0, 200)}` } }];\n}"
+      },
+      "id": "a1b2c3d4-0003-4000-8000-000000000003",
+      "name": "Parse JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0004-4000-8000-000000000004",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [660, 0]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "OpenAI Chat", "type": "main", "index": 0 }]]
+    },
+    "OpenAI Chat": {
+      "main": [[{ "node": "Parse JSON", "type": "main", "index": 0 }]]
+    },
+    "Parse JSON": {
+      "main": [[{ "node": "Respond", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

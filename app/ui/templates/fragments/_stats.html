@@ -1,0 +1,102 @@
+<div class="kpi-grid">
+  <div class="kpi">
+    <div class="label">Contacts</div>
+    <div class="value">{{ '{:,}'.format(kpi.total) }}</div>
+    <div class="meta">{{ '{:,}'.format(kpi.enriched) }} enriched</div>
+  </div>
+  <div class="kpi">
+    <div class="label">Drafted</div>
+    <div class="value">{{ '{:,}'.format(kpi.drafted) }}</div>
+    <div class="meta">{{ '{:,}'.format(kpi.approved) }} approved</div>
+  </div>
+  <div class="kpi">
+    <div class="label">Sent</div>
+    <div class="value">{{ '{:,}'.format(kpi.sent) }}</div>
+    <div class="meta">{% if kpi.reply_rate is not none %}Reply rate {{ kpi.reply_rate }}%{% else %}No sends yet{% endif %}</div>
+  </div>
+  <div class="kpi queue">
+    <div class="label">In queue</div>
+    <div class="value">{{ '{:,}'.format(kpi.verify_n + kpi.review_n) }}</div>
+    <div class="meta">
+      <a href="/ui/verify">{{ kpi.verify_n }} to verify</a> ·
+      <a href="/ui/review">{{ kpi.review_n }} to review</a>
+    </div>
+  </div>
+  <div class="kpi {{ 'alert' if kpi.error_rate > 0 }}">
+    <div class="label">Error rate</div>
+    <div class="value">{{ kpi.error_rate }}%</div>
+    <div class="meta">Last 24 hours</div>
+  </div>
+</div>
+
+<div class="dash-grid">
+  <section class="card">
+    <div class="card-head"><h2>Stage funnel</h2></div>
+    <div class="funnel">
+      {% for label, n, p in funnel %}
+      <div class="funnel-row">
+        <span class="stage">{{ label }}</span>
+        <div class="funnel-bar"><span style="width: {{ p }}%"></span></div>
+        <span class="n">{{ '{:,}'.format(n) }}<small>{{ p }}%</small></span>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="card flush">
+    <div class="card-head"><h2>By campaign</h2><a class="linklike" href="/ui/campaigns">View all</a></div>
+    {% if campaigns %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Campaign</th><th class="num">Contacts</th><th class="num">Drafted</th><th class="num">Approved</th></tr>
+        </thead>
+        <tbody>
+          {% for c in campaigns %}
+          <tr>
+            <td><a href="/ui/campaigns/{{ c.id }}">{{ c.name }}</a></td>
+            <td class="num">{{ '{:,}'.format(c.contacts) }}</td>
+            <td class="num">{{ '{:,}'.format(c.drafted) }}</td>
+            <td class="num">{{ '{:,}'.format(c.approved) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="hint" style="padding: 20px 24px">No campaign activity yet —
+      <a href="/ui/campaigns/new">create a campaign</a> to get started.</p>
+    {% endif %}
+  </section>
+</div>
+
+{% if stuck_sending %}
+<p class="flash error">{{ stuck_sending }} contact(s) stuck at 'sending' — their emails may
+already have gone out before a crash. Check the provider dashboard and resolve manually;
+they are never auto-retried.</p>
+{% endif %}
+
+{% if unsendable %}
+<p class="flash error">Approved but unsendable:
+  {% for row in unsendable %}{{ row.campaign_name }} — {{ row.reason }} ({{ row.contacts }}){% if not loop.last %}; {% endif %}{% endfor %}
+</p>
+{% endif %}
+
+{% set attention = ['failed', 'suppressed', 'bounced'] | select('in', email_counts) | list %}
+<p class="statusline">
+  {% for stage, active in runs.items() %}
+    <span class="badge {{ 'running' if active else 'idle' }}">{{ stage }}: {{ 'running' if active else 'idle' }}</span>
+  {% endfor %}
+  {% if scheduler.enabled and scheduler.running %}
+    <span class="badge running">automation on</span>
+    <span>every {{ scheduler.interval_minutes }} min — drafts still need manual approval.</span>
+  {% else %}
+    <span class="badge idle">automation off</span>
+    <span>stages run only when you click them.</span>
+  {% endif %}
+  {% if attention %}
+    <span>Email:
+      {% for s in attention %}{{ email_counts[s] }} {{ s }}{% if not loop.last %} · {% endif %}{% endfor %}
+    </span>
+  {% endif %}
+</p>

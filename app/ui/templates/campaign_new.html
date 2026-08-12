@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}New campaign — Outreach{% endblock %}
+{% block crumb %}Campaigns{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>New campaign</h1>
+    <p class="hint"><a href="/ui/campaigns">Campaigns</a> / New — name it, say what
+    it's for, attach contacts. The brief and the Smartlead campaign are built for you.</p>
+  </div>
+</div>
+
+{% if error %}<p class="flash error">{{ error }}</p>{% endif %}
+
+<form method="post" action="/ui/campaigns" class="campaign-form"
+      enctype="multipart/form-data">
+  <div class="columns">
+    <div class="col">
+      <label>Name <input name="name" value="{{ form.name or '' }}" required></label>
+      <label>Objective
+        <span class="sub">One paragraph: what you're offering, to whom, and why now.
+        It is expanded into the full campaign brief — editable after creation.</span>
+        <textarea name="objective" rows="6" required>{{ form.objective or '' }}</textarea></label>
+    </div>
+    <div class="col">
+      <label>Sender name
+        <span class="sub">Drafts are written and signed as this person</span>
+        <input name="sender_name" value="{{ form.sender_name or '' }}"></label>
+      <label>Sender role <input name="sender_role" value="{{ form.sender_role or '' }}"></label>
+      <label>Contacts (CSV, optional)
+        <span class="sub">Needs an email column; name, company and title are picked up
+        when present. You can also upload later from the campaign page.</span>
+        <input type="file" name="file" accept=".csv,text/csv"></label>
+    </div>
+  </div>
+  <p class="hint" style="margin-top:16px">Consent: cold — sends via Smartlead. A Smartlead
+  campaign is created and configured automatically (sequence, mailboxes, schedule, active).
+  Switch to opted_in / Resend on the edit page after creation.</p>
+  <button type="submit">Create campaign</button>
+</form>
+{% endblock %}

@@ -1,0 +1,4 @@
+<form hx-post="/ui/runs/{{ stage }}" hx-target="#run-{{ stage }}" hx-swap="innerHTML">
+  <button type="submit" class="secondary" {% if running %}disabled{% endif %}>Run {{ stage }}</button>
+</form>
+<p class="run-result {{ 'ok' if message == 'started' }}">{{ message }}</p>

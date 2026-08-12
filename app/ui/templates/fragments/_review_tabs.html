@@ -1,0 +1,12 @@
+{# The three status tabs, rendered from live review_counts. A
+   display:contents span so it stays a flex child of .filters, yet is a
+   single id an htmx out-of-band swap can replace after a verdict — that
+   is how the counts move without a page reload. `oob` is set only when
+   this is returned inside an action response, never on first render. #}
+<span id="review-tabs" style="display:contents"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% for value, label in [('pending_review', 'Awaiting review'), ('approved', 'Approved'), ('rejected', 'Rejected')] %}
+    <a href="/ui/review?status={{ value }}{% if campaign_id %}&campaign_id={{ campaign_id }}{% endif %}"
+       class="tab {{ 'active' if status == value }}">
+       {{ label }} ({{ counts.get(value, 0) }})</a>
+  {% endfor %}
+</span>

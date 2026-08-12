@@ -1,0 +1,12 @@
+{% if error %}
+  <p class="flash error">{{ error }}</p>
+  {% if detail %}<p class="hint">{{ detail }}</p>{% endif %}
+{% else %}
+  <p class="flash ok">Sent {{ sent }} contacts to ingestion.</p>
+  {% if outcome %}<pre class="payload">{{ outcome }}</pre>{% endif %}
+{% endif %}
+{% if problems %}
+<ul class="hint">
+  {% for problem in problems %}<li>{{ problem }}</li>{% endfor %}
+</ul>
+{% endif %}

@@ -1,0 +1,69 @@
+{# Design's review-card shell, carrying the app's editing workflow: the
+   reviewer edits subject/body/note in place and one action saves+verdicts
+   (a separate approve endpoint would silently approve stale edits). #}
+<article class="review-card" id="contact-{{ contact.id }}">
+  {% if contact.linkedin_status == 'drafted' %}
+  <div class="rc-head">
+    <span class="rc-who">{{ contact.first_name }} {{ contact.last_name or '' }}</span>
+    <span class="rc-meta">
+      {{ contact.title or '—' }}{% if contact.company %} · {{ contact.company }}{% endif %}
+      {% if contact.campaign_name %} · {{ contact.campaign_name }}{% endif %}
+      · {{ contact.email }}
+    </span>
+    <span class="badge {{ contact.review_status }}">{{ (contact.review_status or 'pending_review') | replace('_', ' ') }}</span>
+    {% if contact.reviewed_by %}<small>by {{ contact.reviewed_by }}</small>{% endif %}
+  </div>
+
+  {% if message %}
+  <p class="flash {{ 'error' if error else 'ok' }}" style="margin:16px 20px 0">{{ message }}</p>
+  {% endif %}
+
+  <form hx-post="/ui/contacts/{{ contact.id }}/draft"
+        hx-target="#contact-{{ contact.id }}" hx-swap="outerHTML">
+    {# Carry the current filter so a verdict can re-render the tabs with the
+       right active tab and campaign scope, and keep the tab counts honest. #}
+    <input type="hidden" name="status" value="{{ status or 'pending_review' }}">
+    {% if campaign_id %}<input type="hidden" name="campaign_id" value="{{ campaign_id }}">{% endif %}
+    <div class="rc-body">
+      <div class="rc-grid">
+        <div class="rc-fields">
+          <label>Subject
+            <input name="email_subject" value="{{ contact.email_subject or '' }}">
+          </label>
+          <label>Body
+            <textarea name="email_body" rows="10">{{ contact.email_body or '' }}</textarea>
+          </label>
+          <label>LinkedIn note
+            <span class="sub">Max 300 characters{% if not contact.linkedin_url %} — none: no profile{% endif %}</span>
+            <textarea name="linkedin_note" rows="4" maxlength="300">{{ contact.linkedin_note or '' }}</textarea>
+          </label>
+        </div>
+        <aside class="rc-profile">
+          {% if contact.safe_url %}
+            <a href="{{ contact.safe_url }}" target="_blank" rel="noopener noreferrer">LinkedIn profile ↗</a>
+          {% endif %}
+          <pre>{{ contact.profile_pretty }}</pre>
+        </aside>
+      </div>
+    </div>
+    <div class="rc-foot">
+      <button type="submit" name="action" value="save" class="small secondary">Save</button>
+      <button type="submit" name="action" value="approve" class="small confirm">Save &amp; approve</button>
+      <button type="submit" name="action" value="reject" class="small danger">Save &amp; reject</button>
+      <span class="spacer"></span>
+      <button type="button" class="linklike"
+              hx-post="/ui/contacts/{{ contact.id }}/redraft"
+              hx-confirm="Throw this draft away and queue a fresh LLM draft?"
+              hx-target="#contact-{{ contact.id }}" hx-swap="outerHTML">Re-draft</button>
+    </div>
+  </form>
+  {% else %}
+  {% if message %}
+  <p class="flash {{ 'error' if error else 'ok' }}" style="margin:16px 20px 0">{{ message }}</p>
+  {% endif %}
+  <div class="rc-body">
+    <p class="hint">Contact #{{ contact.id }} is no longer in the drafted state
+      (re-queued or moved on). It will reappear here after the next draft run if applicable.</p>
+  </div>
+  {% endif %}
+</article>

@@ -1,0 +1,19 @@
+{% if events %}
+<div class="events">
+  {% for event in events %}
+  <div class="event {{ 'error' if '_failed' in event.event_type or '_rejected' in event.event_type }}">
+    <span class="t">{{ event.created_at.strftime('%H:%M') if event.created_at else '—' }}</span>
+    <span class="what">
+      <span class="type">{{ event.event_type | replace('_', ' ') }}</span>
+      <span class="detail">
+        {%- if event.email %}{{ event.email }}{% elif event.contact_id %}contact #{{ event.contact_id }}{% endif %}
+        {%- if event.payload_text %} — {{ event.payload_text }}{% endif -%}
+      </span>
+    </span>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<p class="hint" style="padding: 20px 24px">No {{ 'errors' if errors else 'events' }} yet —
+every stage logs what it did here as it runs.</p>
+{% endif %}

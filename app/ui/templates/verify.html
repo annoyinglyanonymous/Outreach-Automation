@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Verify enrichment — Outreach{% endblock %}
+{% block crumb %}Verify{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Enrichment verification</h1>
+    <p class="hint">Lowest-confidence matches first — verdicts feed MIN_ACCEPT_CONFIDENCE tuning.
+    Rejecting clears the URL, any scraped profile and any draft, and re-queues the contact email-only.</p>
+  </div>
+</div>
+
+{% if outcomes %}
+<section class="card flush" style="margin-bottom:24px">
+  <div class="card-head"><h2>Verdicts so far</h2></div>
+  <table class="stats">
+    <thead><tr><th>Verdict</th><th class="num">Count</th><th class="num">Avg confidence</th><th class="num">Min confidence</th></tr></thead>
+    <tbody>
+      {% for row in outcomes %}
+      <tr>
+        <td>{{ 'right person' if row.event_type == 'enrichment_verified' else 'wrong person' }}</td>
+        <td class="num">{{ row.n }}</td><td class="num">{{ row.avg_confidence }}</td><td class="num">{{ row.min_confidence }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<form method="get" action="/ui/verify" class="filters">
+  <select name="campaign_id" onchange="this.form.submit()">
+    <option value="">All campaigns</option>
+    {% for campaign in campaigns %}
+    <option value="{{ campaign.id }}" {% if campaign_id == campaign.id %}selected{% endif %}>{{ campaign.name }}</option>
+    {% endfor %}
+  </select>
+</form>
+
+{% if queue %}
+<section class="card flush">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Company</th><th>Title</th><th>Campaign</th>
+            <th class="num">Confidence</th><th>Found profile</th><th>Verdict</th></tr>
+      </thead>
+      <tbody>
+        {% for contact in queue %}
+        <tr>
+          <td>{{ contact.first_name }} {{ contact.last_name or '' }}</td>
+          <td>{{ contact.company or '—' }}</td>
+          <td>{{ contact.title or '—' }}</td>
+          <td>{{ contact.campaign_name or '—' }}</td>
+          <td class="num">{{ contact.linkedin_confidence }}</td>
+          <td>
+            {% if contact.safe_url %}
+              <a href="{{ contact.safe_url }}" target="_blank" rel="noopener noreferrer">open profile ↗</a>
+            {% else %}
+              {{ contact.linkedin_url }}
+            {% endif %}
+          </td>
+          <td class="actions">
+            <button class="small confirm" hx-post="/ui/contacts/{{ contact.id }}/enrichment/confirm"
+                    hx-target="closest tr" hx-swap="outerHTML">✓ right person</button>
+            <button class="small danger"
+                    hx-post="/ui/contacts/{{ contact.id }}/enrichment/reject"
+                    hx-confirm="Clears URL, profile and any draft, and re-queues email-only. Continue?"
+                    hx-target="closest tr" hx-swap="outerHTML">✗ wrong person</button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% else %}
+<p class="empty">Nothing awaiting verification.</p>
+{% endif %}
+{% endblock %}

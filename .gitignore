@@ -1,0 +1,7 @@
+# Credentials live only in the environment or an untracked .env.
+.env
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/

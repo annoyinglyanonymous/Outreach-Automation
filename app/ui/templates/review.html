@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Draft review — Outreach{% endblock %}
+{% block crumb %}Review{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Draft review</h1></div>
+</div>
+
+<div class="filters">
+  {% include "fragments/_review_tabs.html" %}
+
+  <form method="get" action="/ui/review" style="margin-left:auto">
+    <input type="hidden" name="status" value="{{ status }}">
+    <select name="campaign_id" onchange="this.form.submit()">
+      <option value="">All campaigns</option>
+      {% for campaign in campaigns %}
+      <option value="{{ campaign.id }}" {% if campaign_id == campaign.id %}selected{% endif %}>{{ campaign.name }}</option>
+      {% endfor %}
+    </select>
+  </form>
+</div>
+
+{% if queue %}
+  <div class="review-queue" style="display:grid;gap:16px">
+  {% for contact in queue %}
+    {% with message = None, error = False %}
+      {% include "fragments/_review_card.html" %}
+    {% endwith %}
+  {% endfor %}
+  </div>
+{% else %}
+<p class="empty">Nothing here.</p>
+{% endif %}
+{% endblock %}

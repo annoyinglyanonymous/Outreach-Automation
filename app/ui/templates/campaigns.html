@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Campaigns — Outreach{% endblock %}
+{% block crumb %}Campaigns{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Campaigns</h1>
+    <p class="hint">{{ campaigns | length }} campaign{{ '' if (campaigns | length) == 1 else 's' }}.</p>
+  </div>
+  <a href="/ui/campaigns/new" class="button">New campaign</a>
+</div>
+
+{% if campaigns %}
+<section class="card flush">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Status</th><th>Consent</th><th class="num">Contacts</th>
+            <th class="num">Drafted</th><th class="num">Approved</th><th>Created</th></tr>
+      </thead>
+      <tbody>
+        {% for campaign in campaigns %}
+        <tr>
+          <td><a href="/ui/campaigns/{{ campaign.id }}">{{ campaign.name }}</a></td>
+          <td><span class="badge {{ campaign.status }}">{{ campaign.status }}</span></td>
+          <td>{% if campaign.consent_status %}<span class="badge {{ campaign.consent_status }}">{{ campaign.consent_status | replace('_', ' ') }}</span>{% else %}—{% endif %}</td>
+          <td class="num">{{ campaign.contacts }}</td>
+          <td class="num">{{ campaign.drafted }}</td>
+          <td class="num">{{ campaign.approved }}</td>
+          <td>{{ campaign.created_at.strftime('%b %d, %Y') if campaign.created_at else '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% else %}
+<p class="empty">No campaigns yet.</p>
+{% endif %}
+{% endblock %}

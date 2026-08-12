@@ -1,0 +1,257 @@
+# Outreach Automation — Enrichment & Scraping Service
+
+Python/FastAPI service that takes ingested contacts (insurance agents,
+US market), finds their LinkedIn profiles (Apollo), and scrapes profile
+content (Apify) so a later drafting stage can personalise messages.
+Roughly 800–900 contacts per campaign; correctness and message quality
+matter far more than speed.
+
+## Architecture
+
+Queue-driven, not pipeline-chained: every stage claims work from
+Postgres by status (`FOR UPDATE SKIP LOCKED`) and writes results back.
+No stage calls the next, so a broken stage cannot cascade — contacts
+pile up harmlessly at the previous status and resume when it is fixed.
+
+```
+pending → enriching → enriched → scraping → ready_to_draft → drafted
+                    ↘ (no URL found) ─────→ ready_to_draft ↗
+```
+
+The status column means only "where in the pipeline", never "what the
+outcome was". A contact whose LinkedIn was not found still reaches
+`ready_to_draft`; the failure lives in `events` and is derivable from
+`linkedin_url IS NULL` (likewise `profile_data IS NULL` for scraping).
+
+Layering, please preserve:
+
+- `repo.py` — ALL SQL. Nothing else touches the database.
+- `providers/` — ALL vendor HTTP (Apollo, Apify).
+- `runner.py` / `scraper.py` — the loops. They never see a query string
+  or an HTTP call, which is what makes them testable with fakes.
+
+## Setup
+
+```
+python -m venv .venv
+.venv/Scripts/pip install -r requirements.txt -r requirements-dev.txt
+copy .env.example .env    # then fill in credentials
+.venv/Scripts/python -m uvicorn app.api:app
+```
+
+`DATABASE_URL` must use the Supabase **session pooler** (port 5432, not
+the transaction pooler on 6543) — the claim queries hold locks across
+statements. Do not keep the `[]` from Supabase's password placeholder.
+
+Migrations are hand-applied: run each `migrations/*.sql` in order in the
+Supabase SQL editor; every file is idempotent and ends with a
+verification SELECT that must return `..._ok = true`. Note 006: the
+original base migration (001) never made it into this repo, and the live
+schema was missing the `events` table entirely — 006 backfills it (plus
+`suppression` and `contacts.linkedin_confidence` guards). Without it,
+every stage that logs an event fails, as does /ui/verify and the
+dashboard event feed.
+
+## Web UI
+
+Server-rendered pages (Jinja2 + vendored htmx) inside the same service at
+`/ui` — no separate deploy. Login checks credentials against Supabase
+Auth (invite teammates via the Supabase dashboard); the app then issues
+its own signed session cookie, so no JWT machinery exists here. Pages:
+
+- **Dashboard** — per-stage counts (10s poll), run triggers, event feed.
+- **Verify** — enrichment verification queue, lowest confidence first.
+  "Wrong person" atomically clears the URL, profile and any draft and
+  re-queues the contact email-only; verdicts land in `events` and feed
+  `MIN_ACCEPT_CONFIDENCE` tuning.
+- **Review** — drafted email + LinkedIn note beside the scraped profile;
+  edit inline, then Save / Save & approve / Save & reject (one action, so
+  approving always persists the edits on screen) or Re-draft. Future send
+  stages take only `review_status = 'approved'` contacts, and a re-draft
+  resets the review — an approval can never outlive the copy it approved.
+- **Campaigns** — quick create: name + objective + sender (+ optional
+  CSV). The objective is expanded by one Groq call into the full brief
+  (offer, CTA, tone, fallback template — degrades to a generic template
+  if the LLM is unavailable), and for cold campaigns the Smartlead
+  campaign is built automatically: shell sequence, every connected
+  mailbox, a conservative schedule (`SMARTLEAD_SCHEDULE_*`), activated,
+  id written back. Vendor failures never block creation — outcomes
+  surface as flashes, and the edit page has a "Set up Smartlead" retry.
+  The edit page keeps every field; CSV upload proxies to the n8n ingest
+  webhook (`N8N_INGEST_URL`).
+
+Requires migrations 003 + 004 and the `SUPABASE_URL` /
+`SUPABASE_ANON_KEY` / `SESSION_SECRET` env vars (see .env.example).
+
+## Endpoints
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET /ui/…` | browser session | web UI (see above) |
+| `GET /` | — | endpoint listing |
+| `GET /health` | — | liveness + database reachability |
+| `GET /stats` | `x-api-key` | queue counts, runs in flight |
+| `POST /enrich/run` | `x-api-key` | start an enrichment run (202, background) |
+| `POST /scrape/run` | `x-api-key` | collect finished Apify runs, then start new ones (202, background) |
+| `POST /draft/run` | `x-api-key` | draft emails + LinkedIn notes for `ready_to_draft` contacts (202, background) |
+
+The run endpoints take **no payload** — each runner claims its own work
+from the queue. Trigger them on a schedule; a duplicate trigger while a
+run is active returns 409.
+
+## Automation (scheduler)
+
+The pipeline is manual by default — click **Run** in the dashboard, or
+`POST` the run endpoints. To run it unattended, set `SCHEDULER_ENABLED=true`
+and an in-process scheduler (`app/scheduler.py`, APScheduler) triggers the
+stages every `SCHEDULER_INTERVAL_MINUTES` (default 5).
+
+It runs *inside* the FastAPI process on purpose — no external cron, and
+nothing on the n8n VPS. Each tick calls the same guarded `runs.try_start`
+the buttons do, so a scheduled run never overlaps a manual one or a prior
+tick; a stage that is already running, or missing its config, is skipped
+and retried next interval. Because every stage is idempotent and drains
+its own queue, firing all four on one interval is safe — work a stage
+isn't ready for yet is picked up on a later tick.
+
+**Approval is never automated.** The scheduler drives enrich → scrape →
+draft → email, but the email stage only ever claims contacts a human
+approved in the Review page, so no unreviewed copy can reach a prospect.
+Set `SCHEDULER_STAGES` to a subset (e.g. drop `email`) to automate the
+upstream stages while keeping sending manual. The dashboard shows whether
+automation is on, and `/stats` reports it under `scheduler`.
+
+On top of the interval, **completion nudges** make the flow tick-free:
+a successful CSV ingest starts enrichment immediately, a finished enrich
+run starts scraping, a finished scrape starts drafting, and approving a
+draft starts the email run — all through the same one-run-per-stage
+guard (`runs.nudge`), with the scheduler as the safety net. There is
+deliberately no draft→email nudge: only a human approval opens that
+gate. Net effect: upload a CSV and drafts appear in Review with zero
+clicks; approve, and the send leaves within seconds.
+
+## Enrichment (Apollo)
+
+Tier 0 is a free cache lookup against past campaigns (≤365 days old,
+confidence ≥0.70). Tier 1 is Apollo bulk match; Apollo returns no
+confidence score, so one is derived from agreement between what was sent
+and what came back. Matches below `MIN_ACCEPT_CONFIDENCE` are discarded
+(a URL we cannot attribute confidently is worse than none — the drafter
+would personalise a message to a stranger).
+
+Provider errors (429/5xx/timeout) release the claimed contacts back to
+`pending` and abort the run: "the vendor was down" is not "this person
+has no LinkedIn".
+
+## Scraping (Apify)
+
+Apify runs are asynchronous, so the stage is a starter + collector pair:
+each `/scrape/run` first reconciles runs that finished since the last
+trigger, then claims new batches (one actor run per batch) up to
+`APIFY_MAX_ACTIVE_RUNS` concurrent runs. Nothing blocks; a scheduled
+trigger drains the queue over successive invocations.
+
+- Actor: `harvestapi/linkedin-profile-scraper`, **cookieless** — actors
+  requiring a LinkedIn session cookie carry account-ban risk and are
+  off-limits. Mode is pinned to "no email" ($4/1k); the source lists
+  already carry emails.
+- A failed/expired run releases its contacts back to `enriched` for
+  re-scrape. A profile missing from a successful run's dataset is an
+  outcome: the contact proceeds to `ready_to_draft` with
+  `profile_data IS NULL` and drafting falls back to the template.
+- If a run succeeds with a non-empty dataset but zero items match our
+  URLs, the collector refuses to write (that is a field-mapping
+  misconfiguration, not 50 vanished profiles) and leaves the run
+  claimed — the dataset persists, so re-collecting after fixing
+  `APIFY_URL_FIELDS` costs nothing.
+
+## Drafting (LLM)
+
+Two paths, decided per contact (requires migration 003):
+
+- **`profile_data` present** → one LLM call producing a personalised
+  email plus a LinkedIn connection note, returned as JSON. The ≤300-char
+  note CHECK is enforced in code (one corrective retry, then a
+  word-boundary clamp) because output schemas cannot express length.
+- **No profile** → the campaign's `fallback_email_*` template rendered
+  with `{{first_name}}`-style merge fields. No LLM call — the output is
+  identical for everyone, so generating it N times costs money and adds
+  variance for no benefit. No LinkedIn note: there is no profile to
+  connect to.
+
+The vendor is a provider behind one protocol — `DRAFT_PROVIDER` selects
+it, nothing else changes:
+
+- `n8n` — an n8n webhook fronting the org's OpenAI credential
+  (gpt-4o-mini; ~$0.20 per 900-contact campaign). Setup: import
+  `docs/n8n-llm-workflow.json` into n8n, open the "OpenAI Chat" node
+  and select the org's OpenAI credential, **activate the workflow**
+  (an inactive workflow 404s — same trap as the ingest webhook), then
+  put the production webhook URL in `N8N_LLM_URL`. Model changes are
+  an n8n node edit, not a deploy. The same webhook also powers the
+  quick-create brief expansion.
+- `groq` — OpenAI-compatible endpoint via httpx, JSON mode. Default
+  model `openai/gpt-oss-120b`; well under $1 per 900-contact campaign.
+  Free-tier warning: keep prompt+`DRAFT_MAX_TOKENS` inside the 8000
+  tokens-per-request budget, but not so low that reasoning eats the
+  output (both failure modes were hit live).
+- `anthropic` — official SDK with structured outputs. Default model
+  `claude-opus-4-8`; roughly $17 per 900-contact campaign.
+
+`DRAFT_MODEL` overrides the per-provider default. A refusal releases
+just that contact and the run continues; rate-limit/5xx exhaustion
+releases the unprocessed remainder and aborts, keeping drafts already
+paid for.
+
+## Email sending (Smartlead / Resend)
+
+Requires migration 005. The gate is `email_status = 'drafted' AND
+review_status = 'approved'`, and only this stage moves `email_status`
+forward — which is what makes the business rule hold: **at most one
+first-touch email per contact, ever**. No review/redraft sequence can
+return a sent contact to the queue.
+
+Per campaign, `consent_status` picks the vendor (the AUP constraint):
+
+- **`cold` → Smartlead.** Create a Smartlead campaign whose sequence is
+  exactly the merge shell `{{personalized_subject}}` /
+  `{{personalized_body}}`, attach warmed mailboxes, and put its id in
+  the campaign form. Each approved contact is pushed as a lead carrying
+  the drafted copy; Smartlead schedules delivery, applies its block and
+  unsubscribe lists, and skips leads already in the campaign (which is
+  what makes crash-recovery replays safe).
+- **`opted_in` → Resend.** Needs a verified sending domain and the
+  campaign's `sender_email`. Every send carries
+  `Idempotency-Key: outreach/contact-{id}` so retries cannot double-send.
+
+Safety semantics worth knowing:
+
+- Suppression is swept immediately before every run (and re-checked in
+  the claim); suppressed contacts are terminal, approval notwithstanding.
+- Contacts stuck at `'sending'` (crash between vendor accept and our
+  write) are **never auto-retried** — the dashboard and `/stats` surface
+  them; resolve against the provider dashboard by hand.
+- `'failed'` (hard rejection) is terminal; re-sending is a human decision.
+- Misconfigured campaigns (missing Smartlead id / sender email / API key)
+  are never claimed and cannot starve other campaigns; the dashboard
+  lists them as "approved but unsendable" with the reason.
+
+## Tests
+
+```
+.venv/Scripts/python -m pytest
+```
+
+Fakes only — no database or vendor calls. The suite locks in the
+failure semantics above; enrichment runner/scoring tests are still to
+be formalised from the original throwaway scripts.
+
+## Deployment constraints
+
+- **Never deploy to, or depend on, the n8n VPS.** It runs other
+  production automations.
+- Email sending (future stage) must branch on `consent_status`:
+  Resend/Postmark prohibit cold outreach; cold lists go through
+  cold-email infrastructure.
+- LinkedIn sending (future stage) drives real accounts via Unipile;
+  `accounts.daily_limit` (default 15) is deliberately conservative.

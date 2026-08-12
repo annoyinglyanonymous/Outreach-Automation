@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Outreach{% endblock %}
+{% block crumb %}Dashboard{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Pipeline</h1>
+    <p class="hint">Contact flow across enrichment, drafting and approval. Refreshes every 10 seconds.</p>
+  </div>
+  <section class="runs">
+    {% for stage in stages %}
+    <div class="run-slot" id="run-{{ stage }}">
+      <form hx-post="/ui/runs/{{ stage }}" hx-target="#run-{{ stage }}" hx-swap="innerHTML">
+        <button type="submit" class="secondary">Run {{ stage }}</button>
+      </form>
+    </div>
+    {% endfor %}
+  </section>
+</div>
+
+<div id="stats" hx-get="/ui/fragments/stats" hx-trigger="load, every 10s"></div>
+
+<section class="card flush">
+  <div class="card-head">
+    <h2>Recent events</h2>
+    <span class="seg filters" style="margin:0">
+      <a class="linklike on" hx-get="/ui/fragments/events" hx-target="#events">All</a>
+      <a class="linklike" hx-get="/ui/fragments/events?errors=1" hx-target="#events">Errors only</a>
+    </span>
+  </div>
+  <div id="events" hx-get="/ui/fragments/events" hx-trigger="load, every 15s"></div>
+</section>
+
+<script>
+  document.addEventListener('click', function (e) {
+    var btn = e.target.closest('.seg .linklike');
+    if (!btn) return;
+    btn.parentNode.querySelectorAll('.linklike').forEach(function (a) { a.classList.remove('on'); });
+    btn.classList.add('on');
+  });
+</script>
+{% endblock %}

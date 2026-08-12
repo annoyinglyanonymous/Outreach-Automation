@@ -1,0 +1,29 @@
+# Enrichment service dependencies
+# Versions pinned so a later deploy cannot silently pull a breaking major.
+# After installing and confirming things work, regenerate with:
+#   pip freeze > requirements.txt
+
+# API framework and server
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# PostgreSQL driver (async)
+asyncpg==0.30.0
+
+# Outbound HTTP — Apollo and Apify
+httpx==0.28.1
+
+# Claude API — drafting stage (official SDK: typed errors, built-in retries)
+anthropic==0.120.2
+
+# Loads .env into the environment for local development
+python-dotenv==1.2.2
+
+# Server-rendered UI under /ui
+jinja2==3.1.6
+python-multipart==0.0.20
+itsdangerous==2.2.0
+
+# In-process scheduler — triggers the queue stages on an interval so the
+# pipeline runs unattended (app/scheduler.py). Off unless SCHEDULER_ENABLED.
+apscheduler==3.11.0

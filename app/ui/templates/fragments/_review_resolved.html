@@ -1,0 +1,18 @@
+{# Replaces a card once it has a verdict: an approved/rejected draft is no
+   longer "awaiting review", so it collapses to a one-line acknowledgement
+   instead of lingering as an editable form. The tabs ride along as an
+   out-of-band swap so their counts drop in step — the reviewer works
+   straight down the pending stack without a refresh. #}
+<article class="review-card resolved" id="contact-{{ contact.id }}" style="opacity:.85">
+  <div class="rc-head">
+    <span class="rc-who">{{ contact.first_name }} {{ contact.last_name or '' }}</span>
+    <span class="rc-meta">
+      {{ contact.email }}{% if contact.campaign_name %} · {{ contact.campaign_name }}{% endif %}
+    </span>
+    <span class="badge {{ contact.review_status }}">{{ (contact.review_status or 'pending_review') | replace('_', ' ') }}</span>
+  </div>
+  <div class="rc-body" style="padding:14px 20px">
+    <p class="flash {{ 'error' if error else 'ok' }}" style="margin:0">{{ message }}</p>
+  </div>
+</article>
+{% include "fragments/_review_tabs.html" %}

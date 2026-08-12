@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Edit' if campaign and campaign.id is defined and campaign.id else 'New' }} campaign — Outreach{% endblock %}
+{% block crumb %}Campaigns{% endblock %}
+{% block content %}
+{% set editing = campaign and campaign.get('id') %}
+<div class="page-head">
+  <div>
+    <h1>{{ campaign.name if editing else 'New campaign' }}</h1>
+    <p class="hint"><a href="/ui/campaigns">Campaigns</a> / {{ 'Edit' if editing else 'New' }}</p>
+  </div>
+</div>
+
+{% if error %}<p class="flash error">{{ error }}</p>{% endif %}
+{% for f in flashes or [] %}
+<p class="flash {{ f.level }}">{{ f.text }}</p>
+{% endfor %}
+
+{% if editing and not campaign.smartlead_campaign_id and campaign.consent_status == 'cold' %}
+<section class="card" style="margin-bottom:24px">
+  <div class="card-head"><h2>Smartlead not set up</h2></div>
+  <p class="hint">This cold campaign has no Smartlead campaign yet, so approved drafts
+  cannot send. One click creates and configures it — shell sequence, connected
+  mailboxes, schedule — and activates it.</p>
+  <form method="post" action="/ui/campaigns/{{ campaign.id }}/smartlead-setup"
+        style="margin-top:12px">
+    <button type="submit">Set up Smartlead</button>
+  </form>
+</section>
+{% endif %}
+
+<form method="post" action="{{ '/ui/campaigns/' ~ campaign.id if editing else '/ui/campaigns' }}" class="campaign-form">
+  <div class="columns">
+    <div class="col">
+      <label>Name <input name="name" value="{{ campaign.name if campaign else '' }}" required></label>
+      <label>Status <input name="status" value="{{ campaign.status if campaign else 'active' }}"></label>
+      {# A select, not free text: this field routes real sends (cold →
+         Smartlead, opted_in → Resend) and a typo would silently make the
+         campaign unsendable. #}
+      {% set consent = (campaign.consent_status if campaign else 'cold') or 'cold' %}
+      <label>Consent status <span class="sub">Decides the send vendor: cold → Smartlead, opted_in → Resend</span>
+        <select name="consent_status">
+          <option value="cold" {% if consent == 'cold' %}selected{% endif %}>cold</option>
+          <option value="opted_in" {% if consent == 'opted_in' %}selected{% endif %}>opted_in</option>
+          {% if consent not in ('cold', 'opted_in') %}
+          <option value="{{ consent }}" selected>{{ consent }}</option>
+          {% endif %}
+        </select></label>
+      {# The four values the schema's CHECK allows; free text here cost
+         us a live create. Only email sends exist today — the others are
+         for the LinkedIn phase. #}
+      {% set policy = (campaign.channel_policy if campaign else 'email_only') or 'email_only' %}
+      <label>Channel policy
+        <select name="channel_policy">
+          {% for value in ['email_only', 'linkedin_then_email', 'email_then_linkedin', 'linkedin_only'] %}
+          <option value="{{ value }}" {% if policy == value %}selected{% endif %}>{{ value.replace('_', ' ') }}</option>
+          {% endfor %}
+        </select></label>
+      <label>Sender name <input name="sender_name" value="{{ campaign.sender_name if campaign else '' }}"></label>
+      {# (x or '') everywhere below: NULL columns render as the literal
+         string "None" otherwise, which a Save would then persist. #}
+      <label>Sender role <input name="sender_role" value="{{ (campaign.sender_role or '') if campaign else '' }}"></label>
+      <label>Sender email <span class="sub">Required for opted_in sends via Resend</span>
+        <input name="sender_email" type="email" value="{{ (campaign.sender_email or '') if campaign else '' }}"></label>
+      <label>Smartlead campaign ID
+        <span class="sub">Required for cold sends; its sequence must be
+        the {% raw %}{{personalized_subject}} / {{personalized_body}}{% endraw %} shell</span>
+        <input name="smartlead_campaign_id" value="{{ (campaign.smartlead_campaign_id or '') if campaign else '' }}"></label>
+      <label>Tone <input name="tone" value="{{ (campaign.tone or '') if campaign else '' }}"></label>
+    </div>
+    <div class="col">
+      <label>Offer description
+        <textarea name="offer_description" rows="4">{{ campaign.offer_description if campaign else '' }}</textarea></label>
+      <label>Call to action
+        <textarea name="cta" rows="2">{{ campaign.cta if campaign else '' }}</textarea></label>
+      <label>Audience rationale
+        <textarea name="audience_rationale" rows="3">{{ (campaign.audience_rationale or '') if campaign else '' }}</textarea></label>
+      <label>Fallback email subject
+        <span class="sub">Merge fields: {% raw %}{{first_name}}, {{company}}, {{sender}}{% endraw %}</span>
+        <input name="fallback_email_subject" value="{{ (campaign.fallback_email_subject or '') if campaign else '' }}"></label>
+      <label>Fallback email body
+        <textarea name="fallback_email_body" rows="6">{{ (campaign.fallback_email_body or '') if campaign else '' }}</textarea></label>
+    </div>
+  </div>
+  <button type="submit">{{ 'Save changes' if editing else 'Create campaign' }}</button>
+</form>
+{% if editing %}
+<section class="upload" style="margin-top:24px">
+  <h2>Upload contacts (CSV)</h2>
+  <p class="hint">Needs an email column; first name, last name, company and title are picked up
+  when present. Ingestion runs through the n8n webhook (dedupe + suppression included).</p>
+  <form hx-post="/ui/campaigns/{{ campaign.id }}/upload" hx-target="#upload-result"
+        hx-encoding="multipart/form-data">
+    <input type="file" name="file" accept=".csv,text/csv" required>
+    <button type="submit" class="secondary">Upload &amp; ingest</button>
+  </form>
+  <div id="upload-result"></div>
+</section>
+
+<section class="card" style="margin-top:24px">
+  <div class="card-head"><h2>Danger zone</h2></div>
+  <p class="hint">
+    Deletes this campaign and its contacts and drafts from Outreach. This
+    does <strong>not</strong> delete the Smartlead campaign
+    {% if campaign.smartlead_campaign_id %}({{ campaign.smartlead_campaign_id }}){% endif %}
+    — remove that in Smartlead separately if you want it gone. Cannot be undone.
+  </p>
+  <form method="post" action="/ui/campaigns/{{ campaign.id }}/delete"
+        onsubmit="return confirm('Delete this campaign and all its contacts and drafts? This cannot be undone.')">
+    <button type="submit" class="danger">Delete campaign</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

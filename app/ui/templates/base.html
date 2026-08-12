@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Outreach{% endblock %}</title>
+  {# ?v= busts the browser cache — bump it whenever styles.css changes,
+     or a stale cached sheet renders the new markup unstyled. #}
+  <link rel="stylesheet" href="/ui/static/styles.css?v=6">
+  <script src="/ui/static/htmx.min.js" defer></script>
+</head>
+<body>
+{% if session %}
+<div class="shell">
+  <aside class="sidebar">
+    <span class="brand">Renegade<span class="brand-sub">Outreach</span></span>
+    <nav>
+      <a href="/ui/" class="{{ 'active' if active == 'dashboard' }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>
+        Dashboard</a>
+      <a href="/ui/verify" class="{{ 'active' if active == 'verify' }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>
+        Verify</a>
+      <a href="/ui/review" class="{{ 'active' if active == 'review' }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/><path d="M13 8H7"/><path d="M17 12H7"/></svg>
+        Review</a>
+      <a href="/ui/campaigns" class="{{ 'active' if active == 'campaigns' }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg>
+        Campaigns</a>
+    </nav>
+    <div class="sidebar-foot">
+      <form method="post" action="/ui/logout" class="logout">
+        <span class="user">{{ session.email }}</span>
+        <button type="submit" class="linklike">Sign out</button>
+      </form>
+    </div>
+  </aside>
+
+  <div class="shell-main">
+    <header class="topbar">
+      <span class="crumb">{% block crumb %}{{ active | default('Outreach') }}{% endblock %}</span>
+      <div class="topbar-right">
+        <span class="live"><span class="dot"></span>Live</span>
+        <span class="avatar">{{ session.email[0] | upper }}</span>
+      </div>
+    </header>
+    <main>
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</div>
+{% else %}
+<div class="auth">
+  <div class="auth-brand">
+    <span class="brand">Renegade<span class="brand-sub">Outreach</span></span>
+    <p class="tagline">Break free. Be a Renegade.</p>
+    <p class="note">Enrichment, drafting and review for agency outreach.</p>
+  </div>
+  <div class="auth-form">
+    {% block auth_content %}{% endblock %}
+  </div>
+</div>
+{% endif %}
+</body>
+</html>
