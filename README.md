@@ -236,6 +236,51 @@ Safety semantics worth knowing:
   are never claimed and cannot starve other campaigns; the dashboard
   lists them as "approved but unsendable" with the reason.
 
+### Suppression, unsubscribes & delivery outcomes
+
+The `suppression` table (migration 006) is the global do-not-contact list,
+keyed on `lower(email)`. Every email run sweeps it first (drafted contacts
+whose email is listed flip to `suppressed`, terminal) and the send claim
+re-checks it, so a suppressed address is never mailed by any campaign or
+either vendor. The app only ever *reads* this table.
+
+Live outcomes from Smartlead sends are fed back by an n8n webhook
+(`docs/n8n-suppression-webhook.json`), not app code — the app is not
+publicly reachable, n8n already is and already writes to the same Supabase.
+Smartlead POSTs every event to the workflow, which classifies it and applies
+at most two effects, each guarded independently:
+
+- `LEAD_UNSUBSCRIBED` → add to `suppression`.
+- hard `EMAIL_BOUNCE` → add to `suppression` **and** set the contact
+  `email_status = 'bounced'` (soft bounces are transient and ignored).
+- `EMAIL_REPLY` → set `email_status = 'replied'` (a reply is not a
+  do-not-contact, so no suppression).
+- `EMAIL_SENT` / `FIRST_EMAIL_SENT` → resolve a contact stuck at `sending`
+  (the crash window between vendor-accept and our write) to `sent_email`.
+
+The status write **only ever advances** a contact (`sending → sent_email /
+replied / bounced`, `sent_email → replied / bounced`) — never back to a
+re-sendable state — so the at-most-one-send invariant holds, and stuck
+`sending` is resolved by Smartlead's own confirmation rather than a guessed
+retry. Contacts are matched by `lower(email)` **and** the campaign's
+`smartlead_campaign_id`, so an event for a campaign this app doesn't own
+(matched by neither) is a harmless no-op. The suppression insert is
+idempotent (`WHERE NOT EXISTS` on `lower(email)`); an event is logged
+(`suppression_added` / `reply_received` / `bounce_suppressed` /
+`send_confirmed`) only when something actually changed, doubling as a
+dashboard heartbeat — none end in `_failed`, so the error-rate KPI is
+untouched. **Requires migration 007**, which adds `replied` / `bounced` to
+the `email_status` CHECK; apply it *before* activating the workflow or those
+writes violate the constraint and Smartlead retries the 500 forever.
+
+Setup: apply migration 007, import the workflow, select the Supabase
+Postgres credential in the "Apply to DB" node, **activate it** (an inactive
+workflow silently stops recording unsubscribes — a compliance risk, hence
+the heartbeat events), then register its URL in Smartlead's webhook settings
+subscribed to the unsubscribe, bounce, reply and sent events. Still deferred
+(so n8n's blast radius stays small): the Resend `List-Unsubscribe` header
+and a Resend-side webhook, i.e. the opted-in path's own outcome feedback.
+
 ## Tests
 
 ```
