@@ -141,6 +141,64 @@ async def test_chain_fires_even_after_a_crash(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_scrape_chains_through_verify_to_draft(monkeypatch):
+    """scrape → verify → draft, tick-free."""
+    monkeypatch.setattr(runs, "_NEXT", {"scrape": "verify", "verify": "draft"})
+    monkeypatch.setattr(runs, "missing_config", lambda stage: [])
+    started = []
+
+    async def scrape_run():
+        return _Stats()
+
+    async def verify_run():
+        started.append("verify")
+        return _Stats()
+
+    async def draft_run():
+        started.append("draft")
+        return _Stats()
+
+    monkeypatch.setattr(runs.scraper, "run", scrape_run)
+    monkeypatch.setattr(runs.verifier, "run", verify_run)
+    monkeypatch.setattr(runs.drafting, "run", draft_run)
+
+    runs.try_start("scrape")
+    await asyncio.gather(*runs._tasks)  # scrape done -> nudges verify
+    await asyncio.gather(*runs._tasks)  # verify done -> nudges draft
+    await asyncio.gather(*runs._tasks)  # draft done
+    assert started == ["verify", "draft"]
+
+
+@pytest.mark.asyncio
+async def test_nudge_walks_past_a_disabled_stage(monkeypatch):
+    """verify off → scrape's completion nudge skips it and starts draft."""
+    monkeypatch.setattr(runs, "_NEXT", {"scrape": "verify", "verify": "draft"})
+    monkeypatch.setattr(runs, "missing_config",
+                        lambda stage: ["OFF"] if stage == "verify" else [])
+    started = []
+
+    async def scrape_run():
+        return _Stats()
+
+    async def verify_run():
+        started.append("verify")
+        return _Stats()
+
+    async def draft_run():
+        started.append("draft")
+        return _Stats()
+
+    monkeypatch.setattr(runs.scraper, "run", scrape_run)
+    monkeypatch.setattr(runs.verifier, "run", verify_run)
+    monkeypatch.setattr(runs.drafting, "run", draft_run)
+
+    runs.try_start("scrape")
+    await asyncio.gather(*runs._tasks)  # scrape done -> nudge walks past verify
+    await asyncio.gather(*runs._tasks)  # draft runs
+    assert started == ["draft"]         # verify skipped entirely
+
+
+@pytest.mark.asyncio
 async def test_nudge_skips_unconfigured_stage(monkeypatch):
     monkeypatch.setattr(runs, "missing_config", lambda stage: ["SOME_KEY"])
     assert runs.nudge("email") is False
@@ -174,3 +232,15 @@ def test_missing_config_maps_stages(monkeypatch):
     assert runs.missing_config("draft") == ["GROQ_API_KEY"]
     monkeypatch.setattr(type(config), "DRAFT_PROVIDER", "anthropic")
     assert runs.missing_config("draft") == ["ANTHROPIC_API_KEY"]
+
+
+def test_missing_config_verify(monkeypatch):
+    monkeypatch.setattr(type(config), "VERIFY_ENABLED", True)
+    monkeypatch.setattr(type(config), "DRAFT_PROVIDER", "n8n")
+    monkeypatch.setattr(type(config), "N8N_LLM_URL", "")
+    assert runs.missing_config("verify") == ["N8N_LLM_URL"]
+    monkeypatch.setattr(type(config), "N8N_LLM_URL", "https://n8n.example/webhook/llm")
+    assert runs.missing_config("verify") == []
+    # Turning it off makes the stage skippable (nudge walks past it).
+    monkeypatch.setattr(type(config), "VERIFY_ENABLED", False)
+    assert runs.missing_config("verify") == ["VERIFY_ENABLED (off)"]

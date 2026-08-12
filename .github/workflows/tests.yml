@@ -1,0 +1,25 @@
+name: tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+
+      # No .env is written on purpose. The suite is fakes-only and
+      # tests/conftest.py pins every config value, so a green run here
+      # proves the tests depend on the code and nothing else — which is
+      # the property a developer's populated .env can hide locally.
+      - run: pytest

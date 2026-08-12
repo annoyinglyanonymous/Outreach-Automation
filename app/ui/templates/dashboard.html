@@ -5,17 +5,8 @@
 <div class="page-head">
   <div>
     <h1>Pipeline</h1>
-    <p class="hint">Contact flow across enrichment, drafting and approval. Refreshes every 10 seconds.</p>
+    <p class="hint">Contact flow across enrichment, drafting and approval. Runs itself on a schedule — refreshes every 10 seconds.</p>
   </div>
-  <section class="runs">
-    {% for stage in stages %}
-    <div class="run-slot" id="run-{{ stage }}">
-      <form hx-post="/ui/runs/{{ stage }}" hx-target="#run-{{ stage }}" hx-swap="innerHTML">
-        <button type="submit" class="secondary">Run {{ stage }}</button>
-      </form>
-    </div>
-    {% endfor %}
-  </section>
 </div>
 
 <div id="stats" hx-get="/ui/fragments/stats" hx-trigger="load, every 10s"></div>

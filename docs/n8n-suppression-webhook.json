@@ -1,0 +1,90 @@
+{
+  "name": "Outreach — Smartlead webhook (suppression + outcomes)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "smartlead-events",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "b2c3d4e5-0001-4000-8000-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "b2c3d4e5-0001-4000-8000-0000000000ff"
+    },
+    {
+      "parameters": {
+        "jsCode": "// One classifier for every Smartlead event we act on. Field names have\n// drifted across API versions (docs vs blog disagree) so read every known\n// spelling — the same defensive stance app/providers/smartlead.py takes.\n//\n// Two independent effects, each gated by its own output field:\n//   reason    (non-empty) -> add the address to the suppression list\n//   newStatus (non-empty) -> advance the contact's email_status\n// A hard bounce does BOTH (suppress + mark bounced). A reply only marks\n// (a reply is not a do-not-contact). Soft bounces / opens / clicks are\n// ignored. Status writes NEVER move a contact backwards (see the SQL), so\n// the at-most-one-send invariant holds — 'sent_email' only ever resolves\n// a contact stuck at 'sending' on Smartlead's own send confirmation.\nconst b = $json.body ?? $json;\n\nconst type = String(b.event_type ?? b.event ?? '').toUpperCase();\nconst email = String(b.lead_email ?? b.lead?.email ?? b.to_email ?? b.email ?? '')\n  .trim().toLowerCase();\nconst bounceType = String(b.bounce_type ?? b.bounce_category ?? '').toLowerCase();\nconst campaignId = String(b.campaign_id ?? b.email_campaign_id ?? b.campaignId ?? '').trim();\n\nconst isUnsub = type.includes('UNSUBSCRIB');\nconst isHardBounce = type.includes('BOUNCE') && bounceType === 'hard';\nconst isReply = type.includes('REPLY');\nconst isSent = type.includes('SENT');   // EMAIL_SENT / FIRST_EMAIL_SENT\n\nlet reason = '';      // -> suppression insert\nlet newStatus = '';   // -> contacts.email_status\nlet eventType = '';\n\nif (isUnsub)          { reason = 'unsubscribed'; eventType = 'suppression_added'; }\nelse if (isHardBounce){ reason = 'hard_bounce'; newStatus = 'bounced'; eventType = 'bounce_suppressed'; }\nelse if (isReply)     { newStatus = 'replied'; eventType = 'reply_received'; }\nelse if (isSent)      { newStatus = 'sent_email'; eventType = 'send_confirmed'; }\n\nconst relevant = Boolean(email) && (reason !== '' || newStatus !== '');\n\nreturn [{ json: { relevant, email, reason, newStatus, campaignId, eventType } }];"
+      },
+      "id": "b2c3d4e5-0002-4000-8000-000000000002",
+      "name": "Classify event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            { "value1": "={{ $json.relevant }}", "value2": true }
+          ]
+        }
+      },
+      "id": "b2c3d4e5-0003-4000-8000-000000000003",
+      "name": "Actionable?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH sup AS (\n  INSERT INTO suppression (email, reason)\n  SELECT $1, $2\n  WHERE $2 <> ''\n    AND NOT EXISTS (SELECT 1 FROM suppression WHERE lower(email) = lower($1))\n  RETURNING 1\n),\nupd AS (\n  UPDATE contacts c\n     SET email_status = $3, last_action_at = now()\n    FROM campaigns g\n   WHERE $3 <> ''\n     AND c.campaign_id = g.id\n     AND g.smartlead_campaign_id = $4\n     AND lower(c.email) = lower($1)\n     AND (\n       ($3 = 'sent_email' AND c.email_status = 'sending')\n       OR ($3 IN ('replied','bounced') AND c.email_status IN ('sending','sent_email'))\n     )\n  RETURNING 1\n)\nINSERT INTO events (contact_id, channel, event_type, payload)\nSELECT NULL, 'email', $5,\n       jsonb_build_object('email', $1::text, 'reason', $2::text,\n                          'new_status', $3::text, 'smartlead_campaign_id', $4::text,\n                          'source', 'smartlead_webhook',\n                          'suppressed', (SELECT count(*) FROM sup) > 0,\n                          'status_updated', (SELECT count(*) FROM upd) > 0)\n WHERE (SELECT count(*) FROM sup) > 0 OR (SELECT count(*) FROM upd) > 0;",
+        "options": {
+          "queryReplacement": "={{ $json.email }},{{ $json.reason }},{{ $json.newStatus }},{{ $json.campaignId }},{{ $json.eventType }}"
+        }
+      },
+      "id": "b2c3d4e5-0004-4000-8000-000000000004",
+      "name": "Apply to DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [680, -100]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "ok",
+        "options": {}
+      },
+      "id": "b2c3d4e5-0005-4000-8000-000000000005",
+      "name": "200 OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [920, 0]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Classify event", "type": "main", "index": 0 }]]
+    },
+    "Classify event": {
+      "main": [[{ "node": "Actionable?", "type": "main", "index": 0 }]]
+    },
+    "Actionable?": {
+      "main": [
+        [{ "node": "Apply to DB", "type": "main", "index": 0 }],
+        [{ "node": "200 OK", "type": "main", "index": 0 }]
+      ]
+    },
+    "Apply to DB": {
+      "main": [[{ "node": "200 OK", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

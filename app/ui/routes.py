@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+from urllib.parse import urlsplit
 
 import asyncpg
 from fastapi import Depends, HTTPException, Request
@@ -49,10 +50,23 @@ def _page(request: Request, name: str, session: Session | None, active: str,
 
 def safe_linkedin_url(url: str | None) -> str | None:
     """Render as a clickable link only when it is unambiguously a
-    LinkedIn https URL — the value originates from a vendor."""
-    if url and url.startswith("https://") and ".linkedin.com/" in url + "/":
-        return url
-    if url and url.startswith("https://linkedin.com/"):
+    LinkedIn https URL — the value originates from a vendor.
+
+    Compares the parsed host, not a substring: the previous check asked
+    whether ".linkedin.com/" appeared anywhere in the string, so
+    https://evil.example/.linkedin.com/pwn rendered as a LinkedIn link.
+    """
+    if not url:
+        return None
+    try:
+        parts = urlsplit(url)
+    except ValueError:      # malformed IPv6 literal, bad port
+        return None
+    if parts.scheme != "https":
+        return None
+    host = (parts.hostname or "").lower()
+    # Bare domain, or any subdomain of it (www., np., and friends).
+    if host == "linkedin.com" or host.endswith(".linkedin.com"):
         return url
     return None
 
@@ -121,8 +135,10 @@ async def logout(request: Request):
 
 @router.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request, session: Session = Depends(require_session)):
-    return _page(request, "dashboard.html", session, "dashboard",
-                 {"stages": runs.STAGES})
+    # The pipeline runs itself (scheduler + completion nudges); the manual
+    # per-stage Run buttons were removed. Running/idle state still shows in
+    # the stats fragment's statusline.
+    return _page(request, "dashboard.html", session, "dashboard")
 
 
 @router.get("/fragments/stats", response_class=HTMLResponse)
@@ -179,6 +195,16 @@ async def stats_fragment(request: Request, session: Session = Depends(require_se
     })
 
 
+@router.get("/fragments/review-count", response_class=HTMLResponse)
+async def review_count_fragment(request: Request,
+                                session: Session = Depends(require_session)):
+    """The pending-review count as a bare integer, for the sidebar badge +
+    desktop-alert poller in base.html (present on every page). Plain text so
+    the client parses it directly; no template needed."""
+    counts = await repo.review_counts()
+    return HTMLResponse(str(counts.get("pending_review", 0)))
+
+
 @router.get("/fragments/events", response_class=HTMLResponse)
 async def events_fragment(request: Request, errors: int = 0,
                           session: Session = Depends(require_session)):
@@ -188,26 +214,6 @@ async def events_fragment(request: Request, errors: int = 0,
         event["payload_text"] = json.dumps(payload, default=str) if payload else ""
     return templates.TemplateResponse(request, "fragments/_events.html",
                                       {"events": events, "errors": bool(errors)})
-
-
-@router.post("/runs/{stage}", response_class=HTMLResponse)
-async def trigger_run(request: Request, stage: str,
-                      session: Session = Depends(require_session)):
-    check_origin(request)
-    if stage not in runs.STAGES:
-        raise HTTPException(status_code=404)
-    missing = runs.missing_config(stage)
-    if missing:
-        message = f"not configured — missing {', '.join(missing)}"
-    elif runs.try_start(stage):
-        message = "started"
-    else:
-        message = "already running"
-    return templates.TemplateResponse(request, "fragments/_run_button.html", {
-        "stage": stage,
-        "running": runs.status()[stage],
-        "message": message,
-    })
 
 
 # ---------------------------------------------------------------------
@@ -221,9 +227,13 @@ async def verify_page(request: Request, campaign_id: int | None = None,
     queue = await repo.enrichment_review_queue(campaign_id)
     for contact in queue:
         contact["safe_url"] = safe_linkedin_url(contact["linkedin_url"])
+    recent = await repo.recent_verifications()
+    for row in recent:
+        row["safe_url"] = safe_linkedin_url(row.get("linkedin_url"))
     return _page(request, "verify.html", session, "verify", {
         "queue": queue,
         "outcomes": await repo.verification_outcomes(),
+        "recent": recent,
         "campaigns": await repo.list_campaigns(),
         "campaign_id": campaign_id,
     })
@@ -318,7 +328,13 @@ async def save_draft(request: Request, contact_id: int,
     if action == "save":
         return await card("Saved.")
     verdict = "approved" if action == "approve" else "rejected"
-    await repo.set_review_status(contact_id, verdict, session.email)
+    if not await repo.set_review_status(contact_id, verdict, session.email):
+        # The edit landed, but the contact left 'drafted' in between (a
+        # concurrent re-draft). Collapsing the card here would tell the
+        # reviewer a verdict was recorded when none was, and they would
+        # move on down the stack believing it done.
+        return await card("Saved, but the verdict did not apply — the contact "
+                          "is being re-drafted. Refresh the page.", error=True)
     if verdict == "approved":
         # Approval opens the send gate for this contact — start the email
         # run now so approved mail leaves in seconds, not next tick. The
@@ -337,7 +353,8 @@ def _review_view(form) -> dict:
     raw_campaign = str(form.get("campaign_id") or "")
     return {
         "status": str(form.get("status") or "pending_review"),
-        "campaign_id": int(raw_campaign) if raw_campaign.isdigit() else None,
+        # isdecimal, not isdigit — see _campaign_flashes.
+        "campaign_id": int(raw_campaign) if raw_campaign.isdecimal() else None,
     }
 
 
@@ -419,7 +436,8 @@ _SMARTLEAD_FLASHES = {
     "unconfigured": ("warn", "SMARTLEAD_API_KEY is not set — cold sends need it. "
                              "Set it and use “Set up Smartlead” below."),
     "exists": ("warn", "This campaign already has a Smartlead campaign id — "
-                       "clear the field first to build a fresh one."),
+                       "rebuilding would create a duplicate campaign in Smartlead, "
+                       "so nothing was done."),
     "partial-sequence": ("warn", "Smartlead campaign created, but saving the sequence failed — "
                                  "add the {{personalized_subject}} / {{personalized_body}} shell "
                                  "in Smartlead, then activate."),
@@ -446,8 +464,10 @@ def _campaign_flashes(request: Request) -> list[dict]:
         entry = table.get(params.get(key, ""))
         if entry:
             flashes.append({"level": entry[0], "text": entry[1]})
+    # isdecimal, not isdigit: '²'.isdigit() is True while int('²') raises,
+    # so a hand-edited ?ingested= reached the browser as a 500.
     ingested = params.get("ingested", "")
-    if ingested.isdigit():
+    if ingested.isdecimal():
         flashes.append({"level": "ok",
                         "text": f"{int(ingested)} contact(s) sent to ingestion."})
     return flashes
@@ -465,10 +485,28 @@ async def campaign_edit(request: Request, campaign_id: int,
 
 
 async def _campaign_fields(request: Request) -> dict:
+    # CAMPAIGN_UPDATE_FIELDS, not CAMPAIGN_FIELDS: smartlead_campaign_id
+    # is written by the auto-setup path, so reading it back from a form
+    # that may predate that write would revert it.
     form = await request.form()
-    fields = {f: (str(form.get(f) or "").strip() or None) for f in repo.CAMPAIGN_FIELDS}
+    fields = {f: (str(form.get(f) or "").strip() or None)
+              for f in repo.CAMPAIGN_UPDATE_FIELDS}
     fields["status"] = fields["status"] or "active"
     return fields
+
+
+def _oversize(file: UploadFile) -> int | None:
+    """The upload's declared size when it exceeds CSV_MAX_BYTES, else None.
+
+    Checked before .read() so an oversized file is refused instead of
+    being buffered first. The declared size is client-supplied, so
+    parse_contacts_csv still re-checks the real length as the backstop —
+    this only stops us paying for the transfer.
+    """
+    declared = getattr(file, "size", None)
+    if declared is not None and declared > config.CSV_MAX_BYTES:
+        return declared
+    return None
 
 
 async def _setup_smartlead(name: str, campaign_id: int) -> str:
@@ -544,6 +582,8 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
 
     if isinstance(file, UploadFile) and file.filename:
         try:
+            if _oversize(file) is not None:
+                raise ValueError("file exceeds CSV_MAX_BYTES")
             rows, _problems = parse_contacts_csv(await file.read())
             if not rows:
                 raise ValueError("no usable rows")
@@ -621,6 +661,11 @@ async def campaign_upload(request: Request, campaign_id: int,
     file = form.get("file")
     if not isinstance(file, UploadFile):
         return result({"error": "No file received."}, status_code=422)
+
+    declared = _oversize(file)
+    if declared is not None:
+        return result({"error": f"File is {declared} bytes; the limit is "
+                                f"{config.CSV_MAX_BYTES}."}, status_code=422)
 
     try:
         rows, problems = parse_contacts_csv(await file.read())

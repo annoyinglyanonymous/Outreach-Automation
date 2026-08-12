@@ -77,12 +77,14 @@ class ApolloProvider:
 
     name = "apollo"
 
-    def __init__(self, api_key: str | None = None, batch_size: int | None = None):
+    def __init__(self, api_key: str | None = None, batch_size: int | None = None,
+                 transport: httpx.AsyncBaseTransport | None = None):
         self.api_key = api_key or config.APOLLO_API_KEY
         # Apollo's bulk endpoint caps at 10 records per request and is
         # rate limited to half the single-match endpoint's per-minute
         # allowance, so chunks are small and paced.
         self.batch_size = batch_size or config.APOLLO_BATCH_SIZE
+        self._transport = transport  # tests inject httpx.MockTransport
 
     # -- transport ---------------------------------------------------------
 
@@ -104,8 +106,17 @@ class ApolloProvider:
                 last_error = f"transport: {exc!s}"
             else:
                 if response.status_code == 200:
-                    payload = response.json()
-                    matches = payload.get("matches")
+                    # A proxy or WAF can answer 200 with an HTML error page.
+                    # Letting json's ValueError escape would skip the
+                    # runner's ProviderError handler, so the claimed batch
+                    # would never be released.
+                    try:
+                        payload = response.json()
+                    except ValueError as exc:
+                        raise ProviderError(
+                            f"apollo: 200 with a non-JSON body ({exc})"
+                        ) from exc
+                    matches = payload.get("matches") if isinstance(payload, dict) else None
                     if not isinstance(matches, list):
                         raise ProviderError("apollo: response missing 'matches' array")
                     return matches
@@ -150,7 +161,9 @@ class ApolloProvider:
 
         results: list[EnrichmentResult] = []
 
-        async with httpx.AsyncClient(timeout=config.PROVIDER_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(
+            timeout=config.PROVIDER_TIMEOUT_SECONDS, transport=self._transport
+        ) as client:
             for start in range(0, len(contacts), self.batch_size):
                 chunk = contacts[start : start + self.batch_size]
 

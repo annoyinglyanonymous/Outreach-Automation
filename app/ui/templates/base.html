@@ -6,7 +6,7 @@
   <title>{% block title %}Outreach{% endblock %}</title>
   {# ?v= busts the browser cache — bump it whenever styles.css changes,
      or a stale cached sheet renders the new markup unstyled. #}
-  <link rel="stylesheet" href="/ui/static/styles.css?v=6">
+  <link rel="stylesheet" href="/ui/static/styles.css?v=8">
   <script src="/ui/static/htmx.min.js" defer></script>
 </head>
 <body>
@@ -21,9 +21,10 @@
       <a href="/ui/verify" class="{{ 'active' if active == 'verify' }}">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>
         Verify</a>
-      <a href="/ui/review" class="{{ 'active' if active == 'review' }}">
+      <a href="/ui/review" id="review-link" class="{{ 'active' if active == 'review' }}">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 17a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/><path d="M13 8H7"/><path d="M17 12H7"/></svg>
-        Review</a>
+        Review
+        <span id="review-badge" class="nav-badge" hidden></span></a>
       <a href="/ui/campaigns" class="{{ 'active' if active == 'campaigns' }}">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg>
         Campaigns</a>
@@ -49,6 +50,66 @@
     </main>
   </div>
 </div>
+
+{# Review-queue alerts: poll the pending count, badge the Review nav link +
+   tab title, and raise a desktop notification when the count rises (new
+   drafts landed while you were elsewhere). No htmx — a self-contained
+   poller; if notification permission is denied the badge + title still
+   work. lastSeen rides in localStorage so navigating between pages does
+   not re-fire the pop-up for drafts already announced. #}
+<script>
+(function () {
+  var link = document.getElementById('review-link');
+  var badge = document.getElementById('review-badge');
+  if (!link || !badge) return;
+  var baseTitle = document.title;
+  var KEY = 'reviewSeen';
+  var lastSeen = parseInt(localStorage.getItem(KEY) || '0', 10);
+  if (isNaN(lastSeen)) lastSeen = 0;
+
+  if ('Notification' in window && Notification.permission === 'default') {
+    try { Notification.requestPermission(); } catch (e) { /* older API shape */ }
+  }
+
+  function paint(n) {
+    if (n > 0) {
+      badge.textContent = n > 99 ? '99+' : n;
+      badge.hidden = false;
+      document.title = '(' + n + ') ' + baseTitle;
+    } else {
+      badge.hidden = true;
+      document.title = baseTitle;
+    }
+  }
+
+  function announce(n) {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    try {
+      var note = new Notification('Renegade Outreach', {
+        body: n + ' draft' + (n === 1 ? '' : 's') + ' awaiting review',
+        tag: 'review-queue',            // collapses repeats into one pop-up
+      });
+      note.onclick = function () { window.focus(); location.href = '/ui/review'; };
+    } catch (e) { /* notification construction can throw on some platforms */ }
+  }
+
+  async function poll() {
+    try {
+      var r = await fetch('/ui/fragments/review-count', { headers: { 'HX-Request': 'true' } });
+      if (!r.ok) return;              // 401 on an expired session: skip, retry next tick
+      var n = parseInt((await r.text()).trim(), 10);
+      if (isNaN(n)) return;
+      paint(n);
+      if (n > lastSeen && n > 0) announce(n);
+      lastSeen = n;
+      localStorage.setItem(KEY, String(n));
+    } catch (e) { /* offline / navigating away — try again next tick */ }
+  }
+
+  poll();
+  setInterval(poll, 20000);
+})();
+</script>
 {% else %}
 <div class="auth">
   <div class="auth-brand">

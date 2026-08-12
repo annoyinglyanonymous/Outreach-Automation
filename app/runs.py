@@ -10,20 +10,20 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from . import drafting, emailer, scraper
+from . import drafting, emailer, scraper, verifier
 from . import runner as enrichment
 from .config import config
 
 log = logging.getLogger(__name__)
 
-STAGES = ("enrich", "scrape", "draft", "email")
+STAGES = ("enrich", "scrape", "verify", "draft", "email")
 
 # Completion nudges: when a stage finishes, poke the stage its output
 # feeds so work flows tick-free. This is NOT stage coupling — the next
 # stage still claims its own work from the queue; the nudge only starts
 # a run that would otherwise wait for the scheduler. Deliberately no
 # draft→email link: the human review gate is the pipeline's whole point.
-_NEXT = {"enrich": "scrape", "scrape": "draft"}
+_NEXT = {"enrich": "scrape", "scrape": "verify", "verify": "draft"}
 
 _running: dict[str, bool] = {stage: False for stage in STAGES}
 # Strong references: asyncio only keeps weak refs to tasks, and a
@@ -37,6 +37,8 @@ async def _run_stage(stage: str) -> None:
             stats = await enrichment.run(enrichment.build_provider())
         elif stage == "scrape":
             stats = await scraper.run()
+        elif stage == "verify":
+            stats = await verifier.run()
         elif stage == "draft":
             stats = await drafting.run()
         else:
@@ -50,14 +52,28 @@ async def _run_stage(stage: str) -> None:
     # Chained even after a crash: a partial run may still have advanced
     # contacts the next stage can use, and an empty run is one cheap
     # no-op query.
-    if stage in _NEXT:
-        nudge(_NEXT[stage])
+    _nudge_next(stage)
+
+
+def _nudge_next(stage: str) -> None:
+    """Nudge the next runnable stage in the chain, walking PAST any stage
+    that is unconfigured/disabled — so turning verify off doesn't strand
+    draft (scrape's completion then nudges draft directly)."""
+    nxt = _NEXT.get(stage)
+    while nxt is not None:
+        if missing_config(nxt):
+            nxt = _NEXT.get(nxt)
+            continue
+        nudge(nxt)
+        return
 
 
 def missing_config(stage: str) -> list[str]:
     """Env vars this stage needs beyond the startup-validated core."""
     if stage == "scrape":
         return config.missing_scrape_vars()
+    if stage == "verify":
+        return config.missing_verify_vars()
     if stage == "draft":
         return config.missing_draft_vars()
     if stage == "email":

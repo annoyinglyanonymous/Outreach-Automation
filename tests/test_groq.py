@@ -124,6 +124,20 @@ async def test_401_fails_immediately_without_retry():
 
 
 @pytest.mark.asyncio
+async def test_non_json_body_is_a_provider_error():
+    """Distinct from a non-JSON *content* field: here the HTTP envelope
+    itself is not JSON (a proxy's HTML error page behind a 200). Used to
+    escape as json.JSONDecodeError past the runner's ProviderError
+    handler and abort the run instead of releasing the contact.
+    Fixed 2026-08-12."""
+    def handler(request):
+        return httpx.Response(200, text="<html>502 Bad Gateway</html>")
+
+    with pytest.raises(ProviderError, match="non-JSON body"):
+        await drafter_with(handler).draft("s", "u")
+
+
+@pytest.mark.asyncio
 async def test_gives_up_after_max_retries(monkeypatch):
     monkeypatch.setattr(config, "PROVIDER_MAX_RETRIES", 2)
     attempts = {"n": 0}

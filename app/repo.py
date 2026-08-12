@@ -55,6 +55,20 @@ class DraftTarget:
     campaign: dict
 
 
+@dataclass
+class VerifyTarget:
+    """What the AI verifier compares: the intended contact (from the
+    source list) against the profile a vendor matched + scraped."""
+    id: int
+    email: str
+    first_name: str
+    last_name: str | None
+    company: str | None
+    title: str | None
+    linkedin_url: str | None
+    profile_data: dict | None
+
+
 # =====================================================================
 # enrichment stage
 # =====================================================================
@@ -130,6 +144,11 @@ async def cache_lookup(emails: list[str]) -> dict[str, tuple[str, float]]:
     }
 
 
+# Guarded on 'enriching' like every other claim-writer here: a slow
+# provider call can outlive STALE_CLAIM_MINUTES, and once reset_stale_claims
+# has returned the row to 'pending' another pass may already have carried it
+# to ready_to_draft/drafted. Without the guard that late write would drag it
+# back to 'enriched' and re-pay for a scrape it already had.
 WRITE_RESULTS_SQL = """
 WITH payload AS (
     SELECT * FROM json_to_recordset($1::json) AS x(
@@ -145,6 +164,7 @@ UPDATE contacts c
        last_action_at      = now()
   FROM payload p
  WHERE c.id = p.id
+   AND c.linkedin_status = 'enriching'
 RETURNING c.id;
 """
 
@@ -705,10 +725,16 @@ SELECT g.name AS campaign_name,
   JOIN campaigns g ON g.id = c.campaign_id
  WHERE c.email_status = 'drafted'
    AND c.review_status = 'approved'
-   AND NOT (g.status = 'active'
-        AND g.consent_status = ANY($1::text[])
-        AND ((g.consent_status = 'cold'     AND g.smartlead_campaign_id IS NOT NULL)
-          OR (g.consent_status = 'opted_in' AND g.sender_email IS NOT NULL)))
+   -- IS NOT TRUE, not NOT (...): with consent_status NULL the whole
+   -- predicate is NULL, and NOT NULL is NULL — so a campaign with no
+   -- consent set would be filtered out of this report while also never
+   -- being claimed, i.e. silently stuck with nothing to explain it. The
+   -- CASE above already has a branch naming that case; this is what lets
+   -- it be reached.
+   AND (g.status = 'active'
+    AND g.consent_status = ANY($1::text[])
+    AND ((g.consent_status = 'cold'     AND g.smartlead_campaign_id IS NOT NULL)
+      OR (g.consent_status = 'opted_in' AND g.sender_email IS NOT NULL))) IS NOT TRUE
  GROUP BY 1, 2
  ORDER BY 1, 2;
 """
@@ -763,15 +789,19 @@ INSERT INTO events (contact_id, channel, event_type, payload)
 SELECT c.id, 'linkedin', 'enrichment_verified',
        json_build_object('confidence', c.linkedin_confidence,
                          'url', c.linkedin_url,
-                         'reviewed_by', $2::text)::jsonb
+                         'reviewed_by', $2::text,
+                         'reason', $3::text)::jsonb
   FROM contacts c
  WHERE c.id = $1 AND c.linkedin_url IS NOT NULL
 RETURNING contact_id;
 """
 
 
-async def confirm_enrichment(contact_id: int, reviewed_by: str) -> bool:
-    row = await pool().fetchrow(CONFIRM_ENRICHMENT_SQL, contact_id, reviewed_by)
+async def confirm_enrichment(contact_id: int, reviewed_by: str,
+                             reason: str | None = None) -> bool:
+    # reason is the AI verifier's audit note ("AI: right_person (0.9) — …");
+    # None for a human click.
+    row = await pool().fetchrow(CONFIRM_ENRICHMENT_SQL, contact_id, reviewed_by, reason)
     return row is not None
 
 
@@ -813,15 +843,17 @@ INSERT INTO events (contact_id, channel, event_type, payload)
 SELECT b.id, 'linkedin', 'enrichment_rejected',
        json_build_object('confidence', b.linkedin_confidence,
                          'url', b.linkedin_url,
-                         'reviewed_by', $2::text)::jsonb
+                         'reviewed_by', $2::text,
+                         'reason', $3::text)::jsonb
   FROM before b
   JOIN cleared ON cleared.id = b.id
 RETURNING contact_id;
 """
 
 
-async def reject_enrichment(contact_id: int, reviewed_by: str) -> bool:
-    row = await pool().fetchrow(REJECT_ENRICHMENT_SQL, contact_id, reviewed_by)
+async def reject_enrichment(contact_id: int, reviewed_by: str,
+                            reason: str | None = None) -> bool:
+    row = await pool().fetchrow(REJECT_ENRICHMENT_SQL, contact_id, reviewed_by, reason)
     return row is not None
 
 
@@ -837,6 +869,66 @@ SELECT event_type, count(*)::int AS n,
 
 async def verification_outcomes() -> list[dict]:
     return [dict(r) for r in await pool().fetch(VERIFICATION_OUTCOMES_SQL)]
+
+
+# The AI verify stage's work-list: same "no verdict yet" predicate as the
+# human queue, but only PROFILE-BEARING contacts (a match with no scraped
+# profile is template-drafted regardless, so a verdict changes nothing).
+# exclude_ids are contacts already attempted this run — since a verdict is
+# an event, not a status flip, this is what guarantees the runner's loop
+# makes forward progress and terminates.
+VERIFY_QUEUE_SQL = """
+SELECT c.id, c.email, c.first_name, c.last_name, c.company, c.title,
+       c.linkedin_url, c.profile_data
+  FROM contacts c
+ WHERE c.linkedin_url IS NOT NULL
+   AND c.profile_data IS NOT NULL
+   AND c.linkedin_status IN ('enriched', 'ready_to_draft', 'drafted')
+   AND NOT (c.id = ANY($1::bigint[]))
+   AND NOT EXISTS (
+       SELECT 1 FROM events e
+        WHERE e.contact_id = c.id
+          AND e.event_type IN ('enrichment_verified', 'enrichment_rejected')
+   )
+ ORDER BY c.linkedin_confidence ASC NULLS FIRST
+ LIMIT $2;
+"""
+
+
+async def verify_queue_batch(exclude_ids: list[int],
+                             limit: int | None = None) -> list[VerifyTarget]:
+    rows = await pool().fetch(
+        VERIFY_QUEUE_SQL, exclude_ids or [], limit or config.VERIFY_BATCH_SIZE)
+    return [
+        VerifyTarget(
+            id=r["id"], email=r["email"],
+            first_name=r["first_name"], last_name=r["last_name"],
+            company=r["company"], title=r["title"],
+            linkedin_url=r["linkedin_url"], profile_data=_jsonb(r["profile_data"]),
+        )
+        for r in rows
+    ]
+
+
+# The verify page's audit list: the latest verdicts (AI or human) with the
+# reason and reviewer, so the operator can spot-check what the AI decided.
+RECENT_VERIFICATIONS_SQL = """
+SELECT e.id, e.contact_id, e.event_type, e.created_at,
+       e.payload->>'reviewed_by' AS reviewed_by,
+       e.payload->>'reason'      AS reason,
+       e.payload->>'confidence'  AS confidence,
+       c.first_name, c.last_name, c.company, c.email,
+       c.linkedin_url, c.linkedin_status
+  FROM events e
+  LEFT JOIN contacts c ON c.id = e.contact_id
+ WHERE e.event_type IN ('enrichment_verified', 'enrichment_rejected')
+ ORDER BY e.id DESC
+ LIMIT $1;
+"""
+
+
+async def recent_verifications(limit: int = 20) -> list[dict]:
+    return [dict(r) for r in await pool().fetch(RECENT_VERIFICATIONS_SQL, limit)]
 
 
 # =====================================================================
@@ -1068,6 +1160,16 @@ CAMPAIGN_FIELDS = (
     "sender_email", "smartlead_campaign_id",
 )
 
+# Everything the edit form owns — i.e. CAMPAIGN_FIELDS minus
+# smartlead_campaign_id. That column has a second, non-human writer
+# (set_smartlead_campaign_id, from the Smartlead auto-setup), so a
+# full-row update let a form rendered BEFORE setup ran write its stale
+# empty value back over a freshly created id, silently making a cold
+# campaign unsendable. Creation still sets the column (as NULL).
+CAMPAIGN_UPDATE_FIELDS = tuple(
+    f for f in CAMPAIGN_FIELDS if f != "smartlead_campaign_id"
+)
+
 CREATE_CAMPAIGN_SQL = f"""
 INSERT INTO campaigns ({", ".join(CAMPAIGN_FIELDS)})
 VALUES ({", ".join(f"${i + 1}" for i in range(len(CAMPAIGN_FIELDS)))})
@@ -1076,7 +1178,7 @@ RETURNING id;
 
 UPDATE_CAMPAIGN_SQL = f"""
 UPDATE campaigns
-   SET {", ".join(f"{f} = ${i + 2}" for i, f in enumerate(CAMPAIGN_FIELDS))}
+   SET {", ".join(f"{f} = ${i + 2}" for i, f in enumerate(CAMPAIGN_UPDATE_FIELDS))}
  WHERE id = $1
 RETURNING id;
 """
@@ -1090,8 +1192,11 @@ async def create_campaign(fields: dict) -> int:
 
 
 async def update_campaign(campaign_id: int, fields: dict) -> bool:
+    """Writes CAMPAIGN_UPDATE_FIELDS only; smartlead_campaign_id is not
+    the form's to set (see set_smartlead_campaign_id)."""
     row = await pool().fetchrow(
-        UPDATE_CAMPAIGN_SQL, campaign_id, *[fields.get(f) for f in CAMPAIGN_FIELDS]
+        UPDATE_CAMPAIGN_SQL, campaign_id,
+        *[fields.get(f) for f in CAMPAIGN_UPDATE_FIELDS]
     )
     return row is not None
 

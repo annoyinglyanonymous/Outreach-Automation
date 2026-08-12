@@ -1,3 +1,4 @@
 # Test-only dependencies; production installs use requirements.txt alone.
 pytest==8.3.4
 pytest-asyncio==0.25.2
+pytest-cov==6.0.0

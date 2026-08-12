@@ -61,10 +61,16 @@
       <label>Sender role <input name="sender_role" value="{{ (campaign.sender_role or '') if campaign else '' }}"></label>
       <label>Sender email <span class="sub">Required for opted_in sends via Resend</span>
         <input name="sender_email" type="email" value="{{ (campaign.sender_email or '') if campaign else '' }}"></label>
+      {# Read-only, and deliberately carries no name= so a Save cannot post
+         it. The Smartlead auto-setup writes this column too, so a form
+         rendered before setup ran used to write its stale empty value back
+         over the new id and silently make the campaign unsendable.
+         repo.CAMPAIGN_UPDATE_FIELDS excludes it for the same reason. #}
       <label>Smartlead campaign ID
-        <span class="sub">Required for cold sends; its sequence must be
-        the {% raw %}{{personalized_subject}} / {{personalized_body}}{% endraw %} shell</span>
-        <input name="smartlead_campaign_id" value="{{ (campaign.smartlead_campaign_id or '') if campaign else '' }}"></label>
+        <span class="sub">Set by “Set up Smartlead”; required for cold sends. Its
+        sequence must be the {% raw %}{{personalized_subject}} / {{personalized_body}}{% endraw %} shell</span>
+        <input value="{{ (campaign.smartlead_campaign_id or '') if campaign else '' }}"
+               placeholder="not set" disabled></label>
       <label>Tone <input name="tone" value="{{ (campaign.tone or '') if campaign else '' }}"></label>
     </div>
     <div class="col">

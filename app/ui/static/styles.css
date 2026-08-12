@@ -291,15 +291,6 @@ button.confirm:hover { background: var(--success-bg); border-color: var(--succes
 .funnel-row .n { text-align: right; font-size: 14px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
 .funnel-row .n small { display: block; font-size: 12px; font-weight: 500; color: var(--subtle); }
 
-/* ---------- run controls ---------- */
-
-.runs { display: flex; flex-wrap: wrap; gap: 8px; }
-.runs form { margin: 0; }
-.runs .run-slot { min-width: 0; }
-.runs button { text-transform: capitalize; }
-.run-result { font-size: 13px; color: var(--muted); }
-.run-result.ok { color: var(--success); }
-
 /* ---------- tables ---------- */
 
 table { width: 100%; border-collapse: collapse; }
@@ -568,6 +559,26 @@ input[type="file"]::file-selector-button {
    Small additions the live app needs on top of the design system:
    verify verdict-row swaps, the editable review card, run/scheduler
    status line, and raw payload / profile JSON displays. */
+
+/* sidebar Review nav badge: unread pending-review count, pushed to the
+   right edge of the flex nav link. White on the alert red so it reads on
+   both the navy sidebar and the white active-link background. */
+.nav-badge {
+  margin-left: auto;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--error);
+  color: var(--white);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.nav-badge[hidden] { display: none; }
 
 tr.verdict.ok td { background: var(--success-bg); }
 tr.verdict.bad td { background: var(--error-bg); }

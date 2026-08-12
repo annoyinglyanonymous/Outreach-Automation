@@ -59,11 +59,16 @@ Server-rendered pages (Jinja2 + vendored htmx) inside the same service at
 Auth (invite teammates via the Supabase dashboard); the app then issues
 its own signed session cookie, so no JWT machinery exists here. Pages:
 
-- **Dashboard** — per-stage counts (10s poll), run triggers, event feed.
-- **Verify** — enrichment verification queue, lowest confidence first.
-  "Wrong person" atomically clears the URL, profile and any draft and
-  re-queues the contact email-only; verdicts land in `events` and feed
-  `MIN_ACCEPT_CONFIDENCE` tuning.
+- **Dashboard** — per-stage counts (10s poll), stage running/idle
+  statusline, event feed. (The pipeline runs itself; there are no manual
+  Run buttons.)
+- **Verify** — the AI `verify` stage judges each match automatically
+  (right → keep the personalized draft; wrong/unsure → email-only), so
+  this page is the **audit trail + manual fallback**: recent verdicts with
+  reason/confidence/reviewer, an override to mark an AI-confirmed match
+  wrong, and the still-unverified queue (lowest confidence first) for when
+  the AI is off/down. "Wrong person" atomically clears the URL, profile and
+  any draft and re-queues the contact email-only; verdicts land in `events`.
 - **Review** — drafted email + LinkedIn note beside the scraped profile;
   edit inline, then Save / Save & approve / Save & reject (one action, so
   approving always persists the edits on screen) or Re-draft. Future send
@@ -101,34 +106,36 @@ run is active returns 409.
 
 ## Automation (scheduler)
 
-The pipeline is manual by default — click **Run** in the dashboard, or
-`POST` the run endpoints. To run it unattended, set `SCHEDULER_ENABLED=true`
-and an in-process scheduler (`app/scheduler.py`, APScheduler) triggers the
-stages every `SCHEDULER_INTERVAL_MINUTES` (default 5).
+The pipeline is manual by default — `POST` the run endpoints. To run it
+unattended, set `SCHEDULER_ENABLED=true` and an in-process scheduler
+(`app/scheduler.py`, APScheduler) triggers the stages every
+`SCHEDULER_INTERVAL_MINUTES` (default 5).
 
 It runs *inside* the FastAPI process on purpose — no external cron, and
 nothing on the n8n VPS. Each tick calls the same guarded `runs.try_start`
-the buttons do, so a scheduled run never overlaps a manual one or a prior
-tick; a stage that is already running, or missing its config, is skipped
-and retried next interval. Because every stage is idempotent and drains
-its own queue, firing all four on one interval is safe — work a stage
-isn't ready for yet is picked up on a later tick.
+the endpoints do, so a scheduled run never overlaps a prior tick; a stage
+that is already running, or missing its config, is skipped and retried next
+interval. Because every stage is idempotent and drains its own queue,
+firing them all on one interval is safe — work a stage isn't ready for yet
+is picked up on a later tick.
 
 **Approval is never automated.** The scheduler drives enrich → scrape →
-draft → email, but the email stage only ever claims contacts a human
-approved in the Review page, so no unreviewed copy can reach a prospect.
-Set `SCHEDULER_STAGES` to a subset (e.g. drop `email`) to automate the
-upstream stages while keeping sending manual. The dashboard shows whether
-automation is on, and `/stats` reports it under `scheduler`.
+verify → draft → email, but the email stage only ever claims contacts a
+human approved in the Review page, so no unreviewed copy can reach a
+prospect. Set `SCHEDULER_STAGES` to a subset (e.g. drop `email`) to automate
+the upstream stages while keeping sending manual. `/stats` reports whether
+automation is on under `scheduler`.
 
 On top of the interval, **completion nudges** make the flow tick-free:
 a successful CSV ingest starts enrichment immediately, a finished enrich
-run starts scraping, a finished scrape starts drafting, and approving a
-draft starts the email run — all through the same one-run-per-stage
-guard (`runs.nudge`), with the scheduler as the safety net. There is
-deliberately no draft→email nudge: only a human approval opens that
-gate. Net effect: upload a CSV and drafts appear in Review with zero
-clicks; approve, and the send leaves within seconds.
+run starts scraping, a finished scrape starts verification, a finished
+verification starts drafting, and approving a draft starts the email run —
+all through the same one-run-per-stage guard (`runs.nudge`), with the
+scheduler as the safety net. The nudge walks *past* a stage that's
+unconfigured or off (e.g. `verify` disabled → scrape nudges draft
+directly). There is deliberately no draft→email nudge: only a human
+approval opens that gate. Net effect: upload a CSV and drafts appear in
+Review with zero clicks; approve, and the send leaves within seconds.
 
 ## Enrichment (Apollo)
 
@@ -164,6 +171,31 @@ trigger drains the queue over successive invocations.
   misconfiguration, not 50 vanished profiles) and leaves the run
   claimed — the dataset persists, so re-collecting after fixing
   `APIFY_URL_FIELDS` costs nothing.
+
+## Verification (AI)
+
+Between scrape and draft, the `verify` stage judges whether the LinkedIn
+profile a vendor matched actually belongs to the contact — a wrong match
+would personalize a cold email to a stranger. For each **profile-bearing**
+contact with no verdict yet, one LLM call (the same route as drafting,
+`complete_json` — no new n8n workflow) returns `{verdict, confidence,
+reason}`; the runner applies it through the *same* functions the manual
+verify page uses: `right_person` → confirm (keep the personalized path),
+`wrong_person`/`unsure` → reject (wipe the match; the contact drops to the
+template/email-only draft). Conservative by contract — anything short of a
+clear same-person match is `unsure`, i.e. rejected, because a wrong
+personalized email is worse than a generic one.
+
+No status flip and no migration: a verdict is an `events` row, and the
+runner remembers the contacts it has attempted this run so the queue
+drains and the loop terminates. It does **not** gate draft — the chain
+(`scrape → verify → draft`) runs verify first, and if drafting ever races
+ahead, a later reject clears the draft and re-queues email-only
+(self-correcting). Off (`VERIFY_ENABLED=false`) or with no `complete_json`
+provider configured, the stage no-ops, scrape nudges draft directly, and
+the human `/ui/verify` page is the path. `VERIFY_BATCH_SIZE` bounds each
+pass. Profile-less matches are template-drafted regardless, so they're left
+for the queue rather than spending an LLM call.
 
 ## Drafting (LLM)
 

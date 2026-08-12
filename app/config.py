@@ -88,6 +88,17 @@ class Config:
     # marginal personalisation value does not justify the input tokens.
     DRAFT_PROFILE_CHAR_LIMIT: int = _int("DRAFT_PROFILE_CHAR_LIMIT", 6000)
 
+    # --- AI verification (between scrape and draft) -----------------------
+    # An LLM judges whether the LinkedIn profile a vendor matched really
+    # belongs to the contact; a wrong match is rejected to the email-only
+    # template path. Reuses the drafting LLM route (DRAFT_PROVIDER /
+    # N8N_LLM_URL). Off makes the stage a no-op and manual /ui/verify the
+    # path. gpt-4o-mini judges a match well under a cent per contact.
+    VERIFY_ENABLED: bool = os.getenv(
+        "VERIFY_ENABLED", "true"
+    ).strip().lower() in ("1", "true", "yes", "on")
+    VERIFY_BATCH_SIZE: int = _int("VERIFY_BATCH_SIZE", 25)
+
     # --- email sending (stage 4) -------------------------------------------
     # Cold campaigns send via Smartlead, opted-in via Resend; the claim
     # only picks consents whose key is configured, so either can be
@@ -129,7 +140,7 @@ class Config:
     # irrelevant since each stage claims its own work from the queue.
     SCHEDULER_STAGES: tuple[str, ...] = tuple(
         s.strip()
-        for s in os.getenv("SCHEDULER_STAGES", "enrich,scrape,draft,email").split(",")
+        for s in os.getenv("SCHEDULER_STAGES", "enrich,scrape,verify,draft,email").split(",")
         if s.strip()
     )
 
@@ -182,6 +193,20 @@ class Config:
         if cls.DRAFT_PROVIDER == "groq":
             return [] if cls.GROQ_API_KEY else ["GROQ_API_KEY"]
         return [] if cls.ANTHROPIC_API_KEY else ["ANTHROPIC_API_KEY"]
+
+    @classmethod
+    def missing_verify_vars(cls) -> list[str]:
+        """Non-empty means the verify stage is skipped (nudge + scheduler),
+        so scrape's completion nudge walks past it straight to draft.
+        Reuses the drafting LLM route — only n8n and groq expose the
+        complete_json a verdict needs."""
+        if not cls.VERIFY_ENABLED:
+            return ["VERIFY_ENABLED (off)"]
+        if cls.DRAFT_PROVIDER == "n8n":
+            return [] if cls.N8N_LLM_URL else ["N8N_LLM_URL"]
+        if cls.DRAFT_PROVIDER == "groq":
+            return [] if cls.GROQ_API_KEY else ["GROQ_API_KEY"]
+        return ["DRAFT_PROVIDER=n8n or groq (for verification)"]
 
     @classmethod
     def missing_email_vars(cls) -> list[str]:

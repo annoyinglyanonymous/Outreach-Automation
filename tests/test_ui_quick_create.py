@@ -244,9 +244,14 @@ def test_edit_page_decodes_flashes(client, session_cookie, state):
 
 
 def test_edit_page_ignores_unknown_flash_values(client, session_cookie, state):
+    # Non-whitelisted flash enums render nothing, so an attacker-controlled
+    # value never reaches the DOM. Probe with a distinctive sentinel rather
+    # than a bare "<script>": the page carries a legitimate <script> poller
+    # (the review-queue badge), so we assert the injected value is absent,
+    # not that the page is script-free.
     response = client.get(
-        "/ui/campaigns/1?brief=<script>&smartlead=nope&ingested=xx",
+        "/ui/campaigns/1?brief=<script>xss-probe</script>&smartlead=nope&ingested=xx",
         cookies=session_cookie)
     assert response.status_code == 200
-    assert "<script>" not in response.text
+    assert "xss-probe" not in response.text
     assert "flash warn" not in response.text and "flash ok" not in response.text

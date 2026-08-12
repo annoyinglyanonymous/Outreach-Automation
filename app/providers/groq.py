@@ -113,7 +113,19 @@ class GroqDrafter:
                     last_error = f"transport: {exc!s}"
                 else:
                     if response.status_code == 200:
-                        return response.json()
+                        # A proxy or WAF can answer 200 with an HTML error
+                        # page; json's ValueError would escape past the
+                        # drafting runner's ProviderError handler and abort
+                        # the run instead of releasing the contact.
+                        try:
+                            data = response.json()
+                        except ValueError as exc:
+                            raise ProviderError(
+                                f"groq: 200 with a non-JSON body ({exc})"
+                            ) from exc
+                        if not isinstance(data, dict):
+                            raise ProviderError("groq: response was not a JSON object")
+                        return data
                     if response.status_code not in RETRYABLE_STATUS:
                         # 401/404/422 fail identically on retry; surfacing
                         # immediately makes the cause obvious.

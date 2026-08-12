@@ -54,10 +54,12 @@ class RunInfo:
 class ApifyClient:
     name = "apify"
 
-    def __init__(self, token: str | None = None, actor_id: str | None = None):
+    def __init__(self, token: str | None = None, actor_id: str | None = None,
+                 transport: httpx.AsyncBaseTransport | None = None):
         self.token = token or config.APIFY_TOKEN
         # "user/actor" ids must be addressed as "user~actor" in URL paths.
         self.actor_id = (actor_id or config.APIFY_ACTOR_ID).replace("/", "~")
+        self._transport = transport  # tests inject httpx.MockTransport
 
     # -- transport ---------------------------------------------------------
 
@@ -67,7 +69,9 @@ class ApifyClient:
         run that Apify has expired)."""
         last_error = "unknown"
 
-        async with httpx.AsyncClient(timeout=config.PROVIDER_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(
+            timeout=config.PROVIDER_TIMEOUT_SECONDS, transport=self._transport
+        ) as client:
             for attempt in range(config.PROVIDER_MAX_RETRIES):
                 try:
                     response = await client.request(
@@ -105,7 +109,16 @@ class ApifyClient:
             raise ProviderError(
                 f"apify {context}: {response.status_code} {response.text[:200]}"
             )
-        data = response.json().get("data")
+        # A proxy or WAF can answer 2xx with an HTML error page; json's
+        # ValueError would escape past the scraper's ProviderError handler
+        # and leave the run claimed with no release.
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ProviderError(
+                f"apify {context}: {response.status_code} with a non-JSON body ({exc})"
+            ) from exc
+        data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, dict):
             raise ProviderError(f"apify {context}: response missing 'data' object")
         return data
@@ -163,7 +176,12 @@ class ApifyClient:
                 raise ProviderError(
                     f"apify fetch_items: {response.status_code} {response.text[:200]}"
                 )
-            page = response.json()
+            try:
+                page = response.json()
+            except ValueError as exc:
+                raise ProviderError(
+                    f"apify fetch_items: 200 with a non-JSON body ({exc})"
+                ) from exc
             if not isinstance(page, list):
                 raise ProviderError("apify fetch_items: expected a JSON array")
             items.extend(i for i in page if isinstance(i, dict))

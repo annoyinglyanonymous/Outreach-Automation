@@ -5,8 +5,9 @@
 <div class="page-head">
   <div>
     <h1>Enrichment verification</h1>
-    <p class="hint">Lowest-confidence matches first — verdicts feed MIN_ACCEPT_CONFIDENCE tuning.
-    Rejecting clears the URL, any scraped profile and any draft, and re-queues the contact email-only.</p>
+    <p class="hint">The AI verifier judges each match automatically (right → keep the personalized
+    draft; wrong or unsure → email-only). This page is the audit trail and a manual fallback —
+    anything below is awaiting a verdict.</p>
   </div>
 </div>
 
@@ -24,6 +25,42 @@
       {% endfor %}
     </tbody>
   </table>
+</section>
+{% endif %}
+
+{% if recent %}
+<section class="card flush" style="margin-bottom:24px">
+  <div class="card-head"><h2>Recent verdicts</h2></div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Contact</th><th>Verdict</th><th class="num">Conf.</th>
+            <th>Reason</th><th>By</th><th>When</th><th>Override</th></tr>
+      </thead>
+      <tbody>
+        {% for row in recent %}
+        <tr>
+          <td>{{ row.first_name }} {{ row.last_name or '' }}
+            {% if row.company %}<span class="sub">· {{ row.company }}</span>{% endif %}</td>
+          <td><span class="badge {{ 'approved' if row.event_type == 'enrichment_verified' else 'rejected' }}">
+            {{ 'right person' if row.event_type == 'enrichment_verified' else 'wrong person' }}</span></td>
+          <td class="num">{{ row.confidence or '—' }}</td>
+          <td>{{ row.reason or '—' }}</td>
+          <td>{{ row.reviewed_by or '—' }}</td>
+          <td>{{ row.created_at.strftime('%b %d, %H:%M') if row.created_at else '—' }}</td>
+          <td class="actions">
+            {% if row.event_type == 'enrichment_verified' and row.linkedin_url %}
+            <button class="small danger"
+                    hx-post="/ui/contacts/{{ row.contact_id }}/enrichment/reject"
+                    hx-confirm="Override the AI: mark wrong person? Clears the profile and re-queues email-only."
+                    hx-target="closest tr" hx-swap="outerHTML">✗ mark wrong</button>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </section>
 {% endif %}
 

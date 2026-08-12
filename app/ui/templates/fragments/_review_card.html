@@ -1,8 +1,15 @@
 {# Design's review-card shell, carrying the app's editing workflow: the
    reviewer edits subject/body/note in place and one action saves+verdicts
-   (a separate approve endpoint would silently approve stale edits). #}
+   (a separate approve endpoint would silently approve stale edits).
+
+   Only a *pending* draft is editable with verdict buttons. An already
+   approved/rejected draft renders read-only — the verdict is made, the
+   send gate is (for approved) already open, and offering "Save & approve"
+   on an approved card is both confusing and a no-op. The Approved/Rejected
+   tabs are an audit view, not a re-decision surface. #}
 <article class="review-card" id="contact-{{ contact.id }}">
   {% if contact.linkedin_status == 'drafted' %}
+  {% set resolved = contact.review_status in ('approved', 'rejected') %}
   <div class="rc-head">
     <span class="rc-who">{{ contact.first_name }} {{ contact.last_name or '' }}</span>
     <span class="rc-meta">
@@ -18,6 +25,38 @@
   <p class="flash {{ 'error' if error else 'ok' }}" style="margin:16px 20px 0">{{ message }}</p>
   {% endif %}
 
+  {% if resolved %}
+  {# ---- read-only audit view: no editable fields, no verdict buttons ---- #}
+  <div class="rc-body">
+    <div class="rc-grid">
+      <div class="rc-fields">
+        <div class="rc-subject"><span class="k">Subject</span>{{ contact.email_subject or '—' }}</div>
+        <div class="rc-text"><span class="k">Body</span>{{ contact.email_body or '—' }}</div>
+        {% if contact.linkedin_note %}
+        <div class="rc-text"><span class="k">LinkedIn note</span>{{ contact.linkedin_note }}</div>
+        {% endif %}
+      </div>
+      <aside class="rc-profile">
+        {% if contact.safe_url %}
+          <a href="{{ contact.safe_url }}" target="_blank" rel="noopener noreferrer">LinkedIn profile ↗</a>
+        {% endif %}
+        <pre>{{ contact.profile_pretty }}</pre>
+      </aside>
+    </div>
+  </div>
+  <div class="rc-foot">
+    <span class="hint">
+      {% if contact.review_status == 'approved' %}
+        Approved{% if contact.reviewed_by %} by {{ contact.reviewed_by }}{% endif %} —
+        the send gate is open; the email leaves in the next send window.
+      {% else %}
+        Rejected{% if contact.reviewed_by %} by {{ contact.reviewed_by }}{% endif %} —
+        not queued to send.
+      {% endif %}
+    </span>
+  </div>
+  {% else %}
+  {# ---- editable review form: the only place verdicts are cast ---- #}
   <form hx-post="/ui/contacts/{{ contact.id }}/draft"
         hx-target="#contact-{{ contact.id }}" hx-swap="outerHTML">
     {# Carry the current filter so a verdict can re-render the tabs with the
@@ -57,6 +96,7 @@
               hx-target="#contact-{{ contact.id }}" hx-swap="outerHTML">Re-draft</button>
     </div>
   </form>
+  {% endif %}
   {% else %}
   {% if message %}
   <p class="flash {{ 'error' if error else 'ok' }}" style="margin:16px 20px 0">{{ message }}</p>
