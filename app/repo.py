@@ -1212,6 +1212,27 @@ async def set_smartlead_campaign_id(campaign_id: int, smartlead_id: str) -> bool
     return row is not None
 
 
+# text[] round-trips through asyncpg as a Python list with no codec; NULL
+# means "all connected mailboxes". Kept out of CAMPAIGN_UPDATE_FIELDS (the
+# scalar form-string machinery) and written on its own, like
+# smartlead_campaign_id — the mailbox selection is an array and has its
+# own edit-page action.
+SET_CAMPAIGN_MAILBOXES_SQL = (
+    "UPDATE campaigns SET smartlead_mailboxes = $2 WHERE id = $1 RETURNING id;"
+)
+
+
+async def set_campaign_mailboxes(campaign_id: int,
+                                 emails: list[str] | None) -> bool:
+    """Persist the campaign's send-from mailbox selection (a list of
+    addresses), or NULL for 'all'. An empty list is normalised to NULL so
+    'no selection' has one representation."""
+    row = await pool().fetchrow(
+        SET_CAMPAIGN_MAILBOXES_SQL, campaign_id, emails or None,
+    )
+    return row is not None
+
+
 async def delete_campaign(campaign_id: int) -> bool:
     """Delete a campaign and everything it owns LOCALLY — its contacts
     (and, via ON DELETE CASCADE, those contacts' events). Returns False

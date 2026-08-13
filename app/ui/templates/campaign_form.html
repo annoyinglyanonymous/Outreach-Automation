@@ -103,6 +103,21 @@
 </section>
 
 <section class="card" style="margin-top:24px">
+  <div class="card-head"><h2>Send-from mailboxes</h2></div>
+  <p class="hint">Which connected Smartlead inboxes this campaign sends from. None ticked = all
+  of them. Applies on the next “Set up Smartlead”; an already-set-up campaign keeps its current
+  inboxes until you rebuild it (clear the Smartlead ID above and re-run setup).</p>
+  <form hx-post="/ui/campaigns/{{ campaign.id }}/mailboxes" hx-target="#mailboxes-result">
+    <div id="mailbox-picker"
+         hx-get="/ui/fragments/mailboxes?campaign_id={{ campaign.id }}" hx-trigger="load">
+      <p class="hint">Loading connected mailboxes…</p>
+    </div>
+    <button type="submit" class="secondary" style="margin-top:12px">Save mailboxes</button>
+  </form>
+  <div id="mailboxes-result"></div>
+</section>
+
+<section class="card" style="margin-top:24px">
   <div class="card-head"><h2>Danger zone</h2></div>
   <p class="hint">
     Deletes this campaign and its contacts and drafts from Outreach. This

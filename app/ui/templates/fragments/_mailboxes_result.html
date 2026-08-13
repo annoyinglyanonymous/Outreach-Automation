@@ -1,0 +1,11 @@
+{# Confirmation swapped in after saving a campaign's mailbox selection. #}
+{% if count %}
+<p class="flash ok" style="margin:12px 0 0">Saved — this campaign will send from
+  {{ count }} selected mailbox{{ '' if count == 1 else 'es' }}.{% if already_setup %}
+  It's already set up in Smartlead, so the new selection applies only if you rebuild it
+  (clear the Smartlead ID above and re-run “Set up Smartlead”).{% endif %}</p>
+{% else %}
+<p class="flash ok" style="margin:12px 0 0">Saved — this campaign will send from
+  <strong>all</strong> connected mailboxes.{% if already_setup %} It's already set up in
+  Smartlead; the change applies on rebuild.{% endif %}</p>
+{% endif %}

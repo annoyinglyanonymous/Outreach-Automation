@@ -58,18 +58,29 @@ def state(monkeypatch):
         "id_written": None,
         "ingested": None,
         "setup_calls": 0,
+        "setup_mailboxes": "unset",
+        "mailboxes_set": None,
+        "accounts": [{"id": 11, "email": "a@x.com"}, {"id": 12, "email": "b@x.com"}],
     }
 
     async def expand_objective(objective, sender_name, sender_role, expander=None):
         s["objective_args"] = (objective, sender_name, sender_role)
         return s["brief"]
 
-    async def setup_campaign(name):
+    async def setup_campaign(name, mailboxes=None):
         s["setup_calls"] += 1
+        s["setup_mailboxes"] = mailboxes
         result = s["setup"]
         if isinstance(result, Exception):
             raise result
         return result
+
+    async def set_campaign_mailboxes(cid, emails):
+        s["mailboxes_set"] = (cid, emails)
+        return True
+
+    async def list_email_accounts():
+        return s["accounts"]
 
     async def create_campaign(fields):
         s["created"] = dict(fields)
@@ -94,9 +105,11 @@ def state(monkeypatch):
 
     monkeypatch.setattr(routes.campaign_brief, "expand_objective", expand_objective)
     monkeypatch.setattr(routes.smartlead, "setup_campaign", setup_campaign)
+    monkeypatch.setattr(routes.smartlead, "list_email_accounts", list_email_accounts)
     monkeypatch.setattr(routes.n8n, "ingest", ingest)
     monkeypatch.setattr(repo, "create_campaign", create_campaign)
     monkeypatch.setattr(repo, "set_smartlead_campaign_id", set_smartlead_campaign_id)
+    monkeypatch.setattr(repo, "set_campaign_mailboxes", set_campaign_mailboxes)
     monkeypatch.setattr(repo, "get_campaign", get_campaign)
     monkeypatch.setattr(repo, "delete_campaign", delete_campaign)
 
@@ -187,6 +200,67 @@ def test_no_csv_never_calls_ingest(client, session_cookie, state):
     assert response.status_code == 303
     assert state["ingested"] is None
     assert "ingest" not in response.headers["location"]
+
+
+# ---- mailbox selection ------------------------------------------------
+
+
+def test_create_with_mailboxes_persists_and_threads_to_setup(client, session_cookie, state):
+    create(client, session_cookie, with_csv=False,
+           mailboxes=["a@x.com", "b@x.com"])
+    # Persisted on the campaign AND passed to the Smartlead attach.
+    assert state["mailboxes_set"] == (1, ["a@x.com", "b@x.com"])
+    assert state["setup_mailboxes"] == ["a@x.com", "b@x.com"]
+
+
+def test_create_without_mailboxes_defaults_to_all(client, session_cookie, state):
+    create(client, session_cookie, with_csv=False)
+    # None ticked -> stored NULL and setup gets None (attach all).
+    assert state["mailboxes_set"] == (1, None)
+    assert state["setup_mailboxes"] is None
+
+
+def test_mailbox_picker_fragment_lists_connected(client, session_cookie, state):
+    response = client.get("/ui/fragments/mailboxes", cookies=session_cookie)
+    assert response.status_code == 200
+    body = response.text
+    assert 'value="a@x.com"' in body and 'value="b@x.com"' in body
+    assert "checked" not in body            # new form: nothing pre-selected
+
+
+def test_mailbox_picker_fragment_preselects_stored(client, session_cookie, state):
+    state["campaign"]["smartlead_mailboxes"] = ["a@x.com"]
+    body = client.get("/ui/fragments/mailboxes?campaign_id=1", cookies=session_cookie).text
+    assert body.count("checked") == 1       # only the stored one is ticked
+    # a@x.com is checked; b@x.com is not.
+    assert 'value="a@x.com"' in body and 'value="b@x.com"' in body
+
+
+def test_mailbox_picker_degrades_without_api_key(client, session_cookie, state, monkeypatch):
+    monkeypatch.setattr(type(config), "SMARTLEAD_API_KEY", "")
+    body = client.get("/ui/fragments/mailboxes", cookies=session_cookie).text
+    # Jinja autoescapes the apostrophe in "isn't", so match an escape-free part.
+    assert "use all mailboxes" in body
+    assert 'type="checkbox"' not in body
+
+
+def test_save_mailboxes_persists(client, session_cookie, state):
+    response = client.post("/ui/campaigns/1/mailboxes", cookies=session_cookie,
+                           data={"mailboxes": ["a@x.com"]})
+    assert response.status_code == 200
+    assert state["mailboxes_set"] == (1, ["a@x.com"])
+    assert "Saved" in response.text
+
+
+def test_save_mailboxes_empty_stores_null(client, session_cookie, state):
+    client.post("/ui/campaigns/1/mailboxes", cookies=session_cookie, data={})
+    assert state["mailboxes_set"] == (1, None)   # empty selection -> all
+
+
+def test_set_campaign_mailboxes_sql_targets_the_column():
+    """Fakes bypass SQL, so pin the constant (as done for other repo SQL)."""
+    sql = repo.SET_CAMPAIGN_MAILBOXES_SQL
+    assert "UPDATE campaigns" in sql and "smartlead_mailboxes" in sql
 
 
 def test_missing_objective_is_422_with_no_side_effects(client, session_cookie, state):

@@ -72,6 +72,16 @@ def _count(data: dict, keys: tuple[str, ...]) -> int:
     return total
 
 
+def _account_email(account: dict) -> str:
+    """The mailbox address from an /email-accounts/ entry, tolerating the
+    field-name drift across Smartlead API versions (from_email is current)."""
+    for key in ("from_email", "email", "username"):
+        value = account.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
 class SmartleadSender:
     name = "smartlead"
 
@@ -125,9 +135,14 @@ class SmartleadSender:
 
     # -- campaign auto-setup -------------------------------------------------
 
-    async def setup_campaign(self, name: str) -> CampaignSetup:
+    async def setup_campaign(self, name: str,
+                             mailboxes: list[str] | None = None) -> CampaignSetup:
         """Create and fully configure a Smartlead campaign: shell
-        sequence, every connected mailbox, default schedule, activate.
+        sequence, mailboxes, default schedule, activate.
+
+        `mailboxes` is an optional list of send-from addresses. When given,
+        only the connected inboxes whose address is in it are attached;
+        empty/None attaches every connected mailbox (the prior behaviour).
 
         Stops at the first failure: activating a half-configured campaign
         is worse than leaving it visible-but-drafted. Steps after create
@@ -163,10 +178,24 @@ class SmartleadSender:
                 "GET", f"{API_BASE}/email-accounts/", None, max_attempts=2)
         except ProviderError as exc:
             return CampaignSetup(campaign_id, "email-accounts", str(exc))
-        account_ids = [a["id"] for a in accounts or [] if isinstance(a, dict) and a.get("id")]
-        if not account_ids:
+        connected = [a for a in accounts or [] if isinstance(a, dict) and a.get("id")]
+        if not connected:
             return CampaignSetup(campaign_id, "email-accounts",
                                  "no connected email accounts on the Smartlead account")
+
+        if mailboxes:
+            # Selection given: attach only the connected inboxes whose
+            # address is in it (case-insensitive on from_email). A selection
+            # that matches nothing live is a misconfiguration, not a licence
+            # to silently blast from every inbox.
+            wanted = {m.strip().lower() for m in mailboxes if m and m.strip()}
+            connected = [a for a in connected
+                         if _account_email(a).lower() in wanted]
+            if not connected:
+                return CampaignSetup(campaign_id, "email-accounts",
+                                     "selected mailboxes are not connected to Smartlead")
+
+        account_ids = [a["id"] for a in connected]
 
         error = await step("email-accounts", self._request(
             "POST", f"{API_BASE}/campaigns/{campaign_id}/email-accounts",
@@ -193,6 +222,18 @@ class SmartleadSender:
             return CampaignSetup(campaign_id, "activate", error)
 
         return CampaignSetup(campaign_id)
+
+    async def list_email_accounts(self) -> list[dict]:
+        """Connected mailboxes as [{'id', 'email'}] for the campaign
+        picker. Normalises the address field so the UI and the stored
+        selection speak one spelling (see _account_email)."""
+        accounts = await self._request(
+            "GET", f"{API_BASE}/email-accounts/", None, max_attempts=2)
+        return [
+            {"id": a["id"], "email": _account_email(a)}
+            for a in accounts or []
+            if isinstance(a, dict) and a.get("id")
+        ]
 
     # -- transport ---------------------------------------------------------
 
@@ -251,7 +292,13 @@ class SmartleadSender:
         )
 
 
-async def setup_campaign(name: str) -> CampaignSetup:
+async def setup_campaign(name: str,
+                         mailboxes: list[str] | None = None) -> CampaignSetup:
     """Routes import this module-level wrapper (like n8n.ingest) so tests
     monkeypatch one obvious seam."""
-    return await SmartleadSender().setup_campaign(name)
+    return await SmartleadSender().setup_campaign(name, mailboxes)
+
+
+async def list_email_accounts() -> list[dict]:
+    """Module-level seam for the mailbox picker (mirrors setup_campaign)."""
+    return await SmartleadSender().list_email_accounts()

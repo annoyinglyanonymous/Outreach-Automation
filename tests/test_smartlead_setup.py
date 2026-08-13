@@ -112,6 +112,49 @@ async def test_no_mailboxes_stops_chain():
 
 
 @pytest.mark.asyncio
+async def test_mailbox_selection_attaches_only_chosen():
+    """A selection attaches only the connected inboxes whose from_email is
+    in it (case-insensitive); the rest of the chain is unchanged."""
+    rec = Recorder()
+    setup = await sender(rec).setup_campaign("X", mailboxes=["A@X.com"])
+    assert setup == CampaignSetup("4417")
+    attach = next(b for m, p, b in rec.calls
+                  if m == "POST" and p.endswith("/email-accounts"))
+    assert attach == {"email_account_ids": [11]}   # b@x.com (id 12) excluded
+
+
+@pytest.mark.asyncio
+async def test_empty_selection_attaches_all():
+    """None/empty selection keeps the prior behaviour: attach every inbox."""
+    rec = Recorder()
+    await sender(rec).setup_campaign("X", mailboxes=[])
+    attach = next(b for m, p, b in rec.calls
+                  if m == "POST" and p.endswith("/email-accounts"))
+    assert attach == {"email_account_ids": [11, 12]}
+
+
+@pytest.mark.asyncio
+async def test_selection_matching_nothing_is_a_partial_failure():
+    """A selection that resolves to zero live inboxes stops the chain — we
+    never silently fall back to blasting from every mailbox."""
+    rec = Recorder()
+    setup = await sender(rec).setup_campaign("X", mailboxes=["ghost@nowhere.com"])
+    assert setup.failed_step == "email-accounts"
+    assert not any(p.endswith("/email-accounts") and m == "POST"
+                   for m, p, _ in rec.calls)          # attach never posted
+    assert not any(p.endswith("/schedule") or p.endswith("/status")
+                   for _, p, _ in rec.calls)
+
+
+@pytest.mark.asyncio
+async def test_list_email_accounts_normalises_address():
+    rec = Recorder()
+    accounts = await sender(rec).list_email_accounts()
+    assert accounts == [{"id": 11, "email": "a@x.com"},
+                        {"id": 12, "email": "b@x.com"}]
+
+
+@pytest.mark.asyncio
 async def test_setup_retry_budget_is_two_attempts():
     attempts = {"n": 0}
 
