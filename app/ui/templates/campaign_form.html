@@ -28,7 +28,8 @@
 </section>
 {% endif %}
 
-<form method="post" action="{{ '/ui/campaigns/' ~ campaign.id if editing else '/ui/campaigns' }}" class="campaign-form">
+{% if editing %}<div class="edit-layout">{% endif %}
+<form id="brief-form" method="post" action="{{ '/ui/campaigns/' ~ campaign.id if editing else '/ui/campaigns' }}" class="campaign-form">
   <div class="columns">
     <div class="col">
       <label>Name <input name="name" value="{{ campaign.name if campaign else '' }}" required></label>
@@ -89,6 +90,26 @@
   </div>
   <button type="submit">{{ 'Save changes' if editing else 'Create campaign' }}</button>
 </form>
+{% if editing %}
+{# The preview panel sits OUTSIDE the form (right column) but reads its live,
+   possibly-unsaved values via hx-include="#brief-form". It auto-loads once on
+   open (hx-trigger="load") and re-runs on Refresh — each is one LLM call. #}
+<aside class="preview-panel">
+  <div class="pp-head">
+    <h2>Sample email</h2>
+    <button type="button" class="small secondary"
+            hx-post="/ui/campaigns/{{ campaign.id }}/preview"
+            hx-include="#brief-form" hx-target="#preview-result"
+            hx-disabled-elt="this">Preview</button>
+  </div>
+  <p class="sub" style="margin:0 0 12px">What the AI writes from this brief — no save,
+  no send. Click Preview whenever you want to check the current brief.</p>
+  <div id="preview-result">
+    <p class="hint">Click <strong>Preview</strong> to draft a sample email from this brief.</p>
+  </div>
+</aside>
+</div>
+{% endif %}
 {% if editing %}
 <section class="upload" style="margin-top:24px">
   <h2>Upload contacts (CSV)</h2>

@@ -151,6 +151,105 @@ def build_drafter() -> Drafter:
     raise RuntimeError(f"Unknown DRAFT_PROVIDER: {config.DRAFT_PROVIDER!r}")
 
 
+# The stand-in prospect the campaign "Preview email" button drafts against,
+# so a preview works the instant a campaign exists — before any real contact
+# is enriched. It carries a profile so the personalised (LLM) path runs; it
+# is labelled as a sample in the UI and never persisted.
+PREVIEW_SAMPLE = {
+    "first_name": "Jordan",
+    "last_name": "Reyes",
+    "company": "Reyes Insurance Group",
+    "title": "Agency Owner / Principal",
+    "email": "jordan.reyes@reyesinsurance.com",
+    "profile_data": {
+        "headline": "Owner at Reyes Insurance Group — independent P&C & commercial lines",
+        "location": "Austin, Texas",
+        "about": "Built an independent agency over 12 years; focused on "
+                 "small-business commercial coverage and personal lines.",
+        "experience": [
+            {"title": "Owner / Principal Agent", "company": "Reyes Insurance Group",
+             "years": "2013–present"},
+        ],
+    },
+}
+
+
+def build_preview_target(campaign: dict) -> "repo.DraftTarget":
+    """A DraftTarget for the preview sample — PREVIEW_SAMPLE plus the passed
+    (already aliased) campaign brief. id/email/linkedin_url are dummies; the
+    prompt only reads name/title/company/profile_data and the brief."""
+    return repo.DraftTarget(
+        id=0,
+        email=PREVIEW_SAMPLE["email"],
+        first_name=PREVIEW_SAMPLE["first_name"],
+        last_name=PREVIEW_SAMPLE["last_name"],
+        company=PREVIEW_SAMPLE["company"],
+        title=PREVIEW_SAMPLE["title"],
+        linkedin_url="https://www.linkedin.com/in/sample",
+        profile_data=PREVIEW_SAMPLE["profile_data"],
+        campaign=campaign or {},
+    )
+
+
+async def preview_draft(campaign: dict, drafter: Drafter | None = None) -> dict:
+    """One sample email from an (unsaved) brief, for the campaign "Preview
+    email" button. Reuses the exact drafting path so the preview matches
+    production, but is DB-free, non-persisting, and NEVER raises: a provider
+    failure becomes an on-screen note (a preview must not abort anything).
+
+    `campaign` is the aliased brief dict (offer/cta/tone/sender/…), same shape
+    as DraftTarget.campaign. Returns the sample identity, the fallback
+    template rendered for it (the no-profile path — free, no LLM), and the
+    personalised email (the LLM path) or None with an `error` set when the
+    model is unconfigured or unreachable.
+    """
+    target = build_preview_target(campaign)
+    fields = merge_fields(target)
+    brief = campaign or {}
+    result = {
+        "from": {"name": brief.get("sender"), "role": brief.get("sender_role")},
+        "sample": {
+            "name": f"{target.first_name} {target.last_name}".strip(),
+            "title": target.title,
+            "company": target.company,
+            "email": target.email,
+        },
+        "template": {
+            "subject": render_template(brief.get("fallback_email_subject"), fields),
+            "body": render_template(brief.get("fallback_email_body"), fields),
+        },
+        "personalized": None,
+        "error": None,
+    }
+
+    missing = config.missing_draft_vars()
+    if missing:
+        result["error"] = (
+            "Drafting isn't configured (" + ", ".join(missing) + "), so only the "
+            "fallback template is shown — set the draft provider to preview the "
+            "personalised email."
+        )
+        return result
+
+    try:
+        drafter = drafter or build_drafter()
+        system, user = build_prompts(target)
+        draft = await drafter.draft(system, user)
+        result["personalized"] = {
+            "subject": draft.subject,
+            "body": draft.body,
+            "linkedin_note": clamp_note(draft.linkedin_note),
+        }
+    except DraftRefused:
+        result["error"] = ("The model declined to draft this sample — try "
+                           "adjusting the brief and previewing again.")
+    except ProviderError as exc:
+        log.warning("preview draft: %s", exc)
+        result["error"] = ("The drafting model didn't respond — try again in a "
+                           "moment, or check the LLM configuration.")
+    return result
+
+
 async def _draft_batch(
     targets: list["repo.DraftTarget"],
     drafter: Drafter,

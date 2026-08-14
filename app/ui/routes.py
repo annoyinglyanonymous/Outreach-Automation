@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 # every upload.
 from starlette.datastructures import UploadFile
 
-from .. import campaign_brief, repo, runs
+from .. import campaign_brief, drafting, repo, runs
 from ..config import config
 from ..drafting import NOTE_MAX_CHARS
 from ..providers import n8n, smartlead, supabase_auth
@@ -508,6 +508,26 @@ def _selected_mailboxes(form) -> list[str]:
     return seen
 
 
+def _brief_from_form(form) -> dict:
+    """The aliased brief dict the drafter expects (DraftTarget.campaign
+    shape), read from the edit form's field names. Bridges the two aliases
+    baked into CLAIM_DRAFT_SQL: offer_description -> offer, sender_name ->
+    sender; every other key keeps its name. Blank -> None so empty brief
+    lines drop out of the prompt."""
+    def g(name: str) -> str | None:
+        return str(form.get(name) or "").strip() or None
+    return {
+        "offer": g("offer_description"),
+        "cta": g("cta"),
+        "tone": g("tone"),
+        "sender": g("sender_name"),
+        "sender_role": g("sender_role"),
+        "audience_rationale": g("audience_rationale"),
+        "fallback_email_subject": g("fallback_email_subject"),
+        "fallback_email_body": g("fallback_email_body"),
+    }
+
+
 def _oversize(file: UploadFile) -> int | None:
     """The upload's declared size when it exceeds CSV_MAX_BYTES, else None.
 
@@ -689,6 +709,20 @@ async def campaign_mailboxes(request: Request, campaign_id: int,
         "count": len(mailboxes),
         "already_setup": bool(campaign.get("smartlead_campaign_id")),
     })
+
+
+@router.post("/campaigns/{campaign_id}/preview", response_class=HTMLResponse)
+async def campaign_preview(request: Request, campaign_id: int,
+                          session: Session = Depends(require_session)):
+    """Draft one sample email from the brief currently on screen, so the
+    operator can tune tone before the pipeline drafts hundreds. Stateless —
+    it reads the posted (possibly unsaved) brief values, touches no database,
+    and saves nothing. Uses the same drafting path as production."""
+    check_origin(request)
+    campaign = _brief_from_form(await request.form())
+    preview = await drafting.preview_draft(campaign)
+    return templates.TemplateResponse(request, "fragments/_preview_result.html",
+                                      {"preview": preview})
 
 
 @router.post("/campaigns/{campaign_id}", response_class=HTMLResponse)

@@ -515,6 +515,7 @@ input[type="file"]::file-selector-button {
 }
 .flash.error { background: var(--error-bg); border-color: var(--error-border); color: #96201b; }
 .flash.ok { background: var(--success-bg); border-color: #cde8d6; color: #1d6b3f; }
+.flash.warn { background: var(--warning-bg); border-color: #ecd9a8; color: #7a5600; }
 
 /* ---------- empty state ---------- */
 
@@ -598,6 +599,50 @@ input[type="file"]::file-selector-button {
   cursor: pointer;
 }
 .mailbox-option input { width: auto; min-height: 0; margin: 0; }
+
+/* campaign edit: brief on the left, a live email preview on the right */
+.edit-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+@media (max-width: 1180px) { .edit-layout { grid-template-columns: minmax(0, 1fr); } }
+
+.preview-panel {
+  position: sticky;
+  top: 80px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 20px;
+}
+.preview-panel .pp-head { display: flex; align-items: center; justify-content: space-between; }
+.preview-panel .pp-head h2 { font-size: 16px; }
+
+.pv-label {
+  font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--subtle); margin: 16px 0 6px;
+}
+.pv-tag {
+  display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--subtle); margin-bottom: 4px;
+}
+
+/* an email-client-style card so the sample reads like a real message */
+.email-card { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--white); overflow: hidden; }
+.email-head { padding: 12px 16px; background: var(--pale-soft); border-bottom: 1px solid var(--border); }
+.email-head .eh-row { display: flex; gap: 8px; font-size: 12.5px; line-height: 1.5; }
+.email-head .eh-k { flex: none; width: 34px; color: var(--subtle); font-weight: 600; }
+.email-head .eh-v { color: var(--body); overflow-wrap: anywhere; }
+.email-head .eh-subject { margin-top: 8px; font-size: 15px; font-weight: 700; color: var(--ink); }
+.email-body { padding: 16px; font-size: 14px; line-height: 1.65; color: var(--body); white-space: pre-wrap; }
+
+.ln-note {
+  margin-top: 14px; padding: 12px 14px; border: 1px solid var(--border);
+  border-left: 3px solid var(--navy-500); border-radius: var(--r-md); background: var(--surface);
+}
+.ln-note p { margin: 0; font-size: 13.5px; line-height: 1.55; color: var(--body); white-space: pre-wrap; }
 
 tr.verdict.ok td { background: var(--success-bg); }
 tr.verdict.bad td { background: var(--error-bg); }

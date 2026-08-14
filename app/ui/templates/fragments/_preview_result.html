@@ -1,0 +1,38 @@
+{# One sample email drafted from the brief on screen, rendered like a real
+   email (From / To / Subject / body). Shows the personalised (LLM) path and
+   the fallback template path. Non-persisting — nothing here is saved or sent. #}
+<div class="preview-out">
+  {% if preview.personalized %}
+  <div class="pv-label">Personalized · contact with a LinkedIn profile</div>
+  <article class="email-card">
+    <div class="email-head">
+      <div class="eh-row"><span class="eh-k">From</span><span class="eh-v">{{ preview.from.name or 'You' }}{% if preview.from.role %} · {{ preview.from.role }}{% endif %}</span></div>
+      <div class="eh-row"><span class="eh-k">To</span><span class="eh-v">{{ preview.sample.name }}{% if preview.sample.email %} &lt;{{ preview.sample.email }}&gt;{% endif %}</span></div>
+      <div class="eh-subject">{{ preview.personalized.subject or '(no subject)' }}</div>
+    </div>
+    <div class="email-body">{{ preview.personalized.body or '(no body)' }}</div>
+  </article>
+  {% if preview.personalized.linkedin_note %}
+  <div class="ln-note">
+    <span class="pv-tag">LinkedIn connection note</span>
+    <p>{{ preview.personalized.linkedin_note }}</p>
+  </div>
+  {% endif %}
+  {% endif %}
+
+  {% if preview.error %}
+  <p class="flash warn" style="margin:14px 0 0">{{ preview.error }}</p>
+  {% endif %}
+
+  <div class="pv-label">Fallback template · contact with no LinkedIn</div>
+  <article class="email-card">
+    <div class="email-head">
+      <div class="eh-row"><span class="eh-k">From</span><span class="eh-v">{{ preview.from.name or 'You' }}{% if preview.from.role %} · {{ preview.from.role }}{% endif %}</span></div>
+      <div class="eh-row"><span class="eh-k">To</span><span class="eh-v">{{ preview.sample.name }}{% if preview.sample.email %} &lt;{{ preview.sample.email }}&gt;{% endif %}</span></div>
+      <div class="eh-subject">{{ preview.template.subject or '(no subject)' }}</div>
+    </div>
+    <div class="email-body">{{ preview.template.body or '(no body)' }}</div>
+  </article>
+
+  <p class="hint" style="margin-top:14px">Sample only — nothing is saved or sent. Edit the brief and hit Refresh.</p>
+</div>

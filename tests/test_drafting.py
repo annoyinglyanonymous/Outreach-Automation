@@ -296,3 +296,62 @@ async def test_stale_claims_recovered(state):
     state["stale"] = 2
     stats = await drafting.run(FakeDrafter())
     assert stats.stale_recovered == 2
+
+
+# ---------------------------------------------------------------------
+# preview (the campaign "Preview email" button)
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_preview_draft_returns_personalized_and_template(monkeypatch):
+    # A configured provider (conftest pins GROQ_API_KEY="" -> "missing").
+    monkeypatch.setattr(type(config), "GROQ_API_KEY", "k")
+    drafter = FakeDrafter([Draft("Sample subject", "Sample body", "Sample note")])
+
+    out = await drafting.preview_draft(CAMPAIGN, drafter=drafter)
+
+    assert out["error"] is None
+    assert len(drafter.calls) == 1                    # the LLM ran once, for the sample
+    assert out["personalized"] == {
+        "subject": "Sample subject", "body": "Sample body", "linkedin_note": "Sample note"}
+    # Template rendered from the SAMPLE's merge fields (Jordan / Reyes Insurance Group / Rojan).
+    assert out["template"]["subject"] == "Quick question, Jordan"
+    assert out["template"]["body"] == "Hi Jordan, saw Reyes Insurance Group and thought of you. - Rojan"
+    assert out["sample"]["name"] == "Jordan Reyes"
+    assert out["sample"]["email"]                 # a display address for the To line
+    assert out["from"]["name"] == "Rojan"         # sender carried through for the From line
+
+
+@pytest.mark.asyncio
+async def test_preview_draft_unconfigured_skips_llm_but_shows_template():
+    # conftest leaves GROQ_API_KEY empty with DRAFT_PROVIDER=groq -> missing.
+    drafter = FakeDrafter()
+    out = await drafting.preview_draft(CAMPAIGN, drafter=drafter)
+
+    assert out["personalized"] is None
+    assert out["error"] and "GROQ_API_KEY" in out["error"]
+    assert drafter.calls == []                        # never called the model
+    assert out["template"]["subject"] == "Quick question, Jordan"  # template still shown
+
+
+@pytest.mark.asyncio
+async def test_preview_draft_provider_error_keeps_template(monkeypatch):
+    monkeypatch.setattr(type(config), "GROQ_API_KEY", "k")
+    drafter = FakeDrafter([ProviderError("n8n llm: down")])
+
+    out = await drafting.preview_draft(CAMPAIGN, drafter=drafter)
+
+    assert out["personalized"] is None
+    assert out["error"] and "didn't respond" in out["error"]
+    assert out["template"]["subject"] == "Quick question, Jordan"  # a preview never aborts
+
+
+@pytest.mark.asyncio
+async def test_preview_draft_clamps_long_note(monkeypatch):
+    monkeypatch.setattr(type(config), "GROQ_API_KEY", "k")
+    drafter = FakeDrafter([Draft("S", "B", "word " * 100)])
+
+    out = await drafting.preview_draft(CAMPAIGN, drafter=drafter)
+
+    assert len(out["personalized"]["linkedin_note"]) <= drafting.NOTE_MAX_CHARS
