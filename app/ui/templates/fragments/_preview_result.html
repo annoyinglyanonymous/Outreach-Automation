@@ -1,9 +1,15 @@
-{# One sample email drafted from the brief on screen, rendered like a real
-   email (From / To / Subject / body). Shows the personalised (LLM) path and
-   the fallback template path. Non-persisting — nothing here is saved or sent. #}
+{# One email drafted from the brief on screen for a real contact in this
+   campaign (or a synthetic sample when none is ingested yet), rendered like a
+   real email (From / To / Subject / body). Non-persisting — nothing here is
+   saved or sent. #}
+{% set is_real = preview.source == 'contact' %}
 <div class="preview-out">
+  {% if is_real %}
+  <div class="pv-who">Previewing a real contact from this campaign — not a sample.</div>
+  {% endif %}
+
   {% if preview.personalized %}
-  <div class="pv-label">Personalized · contact with a LinkedIn profile</div>
+  <div class="pv-label">Personalized · {{ preview.sample.name }}{% if not is_real %} (sample){% endif %}</div>
   <article class="email-card">
     <div class="email-head">
       <div class="eh-row"><span class="eh-k">From</span><span class="eh-v">{{ preview.from.name or 'You' }}{% if preview.from.role %} · {{ preview.from.role }}{% endif %}</span></div>
@@ -20,11 +26,14 @@
   {% endif %}
   {% endif %}
 
+  {% if preview.note %}
+  <p class="hint" style="margin:14px 0 0">{{ preview.note }}</p>
+  {% endif %}
   {% if preview.error %}
   <p class="flash warn" style="margin:14px 0 0">{{ preview.error }}</p>
   {% endif %}
 
-  <div class="pv-label">Fallback template · contact with no LinkedIn</div>
+  <div class="pv-label">Fallback template · used when a contact has no LinkedIn profile</div>
   <article class="email-card">
     <div class="email-head">
       <div class="eh-row"><span class="eh-k">From</span><span class="eh-v">{{ preview.from.name or 'You' }}{% if preview.from.role %} · {{ preview.from.role }}{% endif %}</span></div>
@@ -34,5 +43,8 @@
     <div class="email-body">{{ preview.template.body or '(no body)' }}</div>
   </article>
 
-  <p class="hint" style="margin-top:14px">Sample only — nothing is saved or sent. Edit the brief and hit Refresh.</p>
+  <p class="hint" style="margin-top:14px">
+    {% if is_real %}Live draft for a real contact — nothing is saved or sent.
+    {% else %}No contacts ingested yet, so this is a sample — nothing is saved or sent.
+    {% endif %}Edit the brief and hit Refresh.</p>
 </div>

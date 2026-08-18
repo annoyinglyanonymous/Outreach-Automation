@@ -305,8 +305,8 @@ async def test_stale_claims_recovered(state):
 
 @pytest.mark.asyncio
 async def test_preview_draft_returns_personalized_and_template(monkeypatch):
-    # A configured provider (conftest pins GROQ_API_KEY="" -> "missing").
-    monkeypatch.setattr(type(config), "GROQ_API_KEY", "k")
+    # A configured provider (conftest pins N8N_LLM_URL="" -> "missing").
+    monkeypatch.setattr(type(config), "N8N_LLM_URL", "https://n8n.example/webhook/llm")
     drafter = FakeDrafter([Draft("Sample subject", "Sample body", "Sample note")])
 
     out = await drafting.preview_draft(CAMPAIGN, drafter=drafter)
@@ -325,19 +325,19 @@ async def test_preview_draft_returns_personalized_and_template(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_preview_draft_unconfigured_skips_llm_but_shows_template():
-    # conftest leaves GROQ_API_KEY empty with DRAFT_PROVIDER=groq -> missing.
+    # conftest leaves N8N_LLM_URL empty with DRAFT_PROVIDER=n8n -> missing.
     drafter = FakeDrafter()
     out = await drafting.preview_draft(CAMPAIGN, drafter=drafter)
 
     assert out["personalized"] is None
-    assert out["error"] and "GROQ_API_KEY" in out["error"]
+    assert out["error"] and "N8N_LLM_URL" in out["error"]
     assert drafter.calls == []                        # never called the model
     assert out["template"]["subject"] == "Quick question, Jordan"  # template still shown
 
 
 @pytest.mark.asyncio
 async def test_preview_draft_provider_error_keeps_template(monkeypatch):
-    monkeypatch.setattr(type(config), "GROQ_API_KEY", "k")
+    monkeypatch.setattr(type(config), "N8N_LLM_URL", "https://n8n.example/webhook/llm")
     drafter = FakeDrafter([ProviderError("n8n llm: down")])
 
     out = await drafting.preview_draft(CAMPAIGN, drafter=drafter)
@@ -349,9 +349,51 @@ async def test_preview_draft_provider_error_keeps_template(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_preview_draft_clamps_long_note(monkeypatch):
-    monkeypatch.setattr(type(config), "GROQ_API_KEY", "k")
+    monkeypatch.setattr(type(config), "N8N_LLM_URL", "https://n8n.example/webhook/llm")
     drafter = FakeDrafter([Draft("S", "B", "word " * 100)])
 
     out = await drafting.preview_draft(CAMPAIGN, drafter=drafter)
 
     assert len(out["personalized"]["linkedin_note"]) <= drafting.NOTE_MAX_CHARS
+
+
+@pytest.mark.asyncio
+async def test_preview_draft_uses_a_real_contact_when_given(monkeypatch):
+    """With a real contact, the preview is that contact's email — its
+    identity and profile drive the draft, not the synthetic sample."""
+    monkeypatch.setattr(type(config), "N8N_LLM_URL", "https://n8n.example/webhook/llm")
+    drafter = FakeDrafter([Draft("Hi Alex", "Body for Alex", "note")])
+    contact = DraftTarget(
+        id=9, email="alex@acme.com", first_name="Alex", last_name=None,
+        company="Acme", title="Owner", linkedin_url="https://in/alex",
+        profile_data={"headline": "Owner at Acme"}, campaign={})
+
+    out = await drafting.preview_draft(CAMPAIGN, drafter=drafter, contact=contact)
+
+    assert out["source"] == "contact"
+    assert out["sample"]["name"] == "Alex"        # last_name None -> no trailing space
+    assert out["sample"]["email"] == "alex@acme.com"
+    assert out["personalized"]["subject"] == "Hi Alex"
+    # The brief on screen still drives the copy (overlaid onto the contact).
+    assert out["template"]["body"] == "Hi Alex, saw Acme and thought of you. - Rojan"
+
+
+@pytest.mark.asyncio
+async def test_preview_draft_real_contact_without_profile_shows_fallback_note(monkeypatch):
+    """A real contact not yet scraped mirrors production exactly: no LLM
+    email (the model never runs), the fallback template, and a note that
+    explains why — rather than fabricating an email the contact wouldn't get."""
+    monkeypatch.setattr(type(config), "N8N_LLM_URL", "https://n8n.example/webhook/llm")
+    drafter = FakeDrafter([Draft("should not", "be used", None)])
+    contact = DraftTarget(
+        id=9, email="new@acme.com", first_name="Sam", last_name="Lee",
+        company="Acme", title=None, linkedin_url=None,
+        profile_data=None, campaign={})
+
+    out = await drafting.preview_draft(CAMPAIGN, drafter=drafter, contact=contact)
+
+    assert out["personalized"] is None
+    assert drafter.calls == []                    # no profile -> LLM never ran
+    assert out["error"] is None
+    assert out["note"] and "scraped" in out["note"]
+    assert out["template"]["subject"] == "Quick question, Sam"  # fallback still rendered

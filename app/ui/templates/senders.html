@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Senders — Outreach{% endblock %}
+{% block crumb %}Senders{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Senders</h1>
+    <p class="hint">The cold From-rotation pool — auto-synced from your Mailjet verified
+    senders. Emails rotate across the active ones least-recently-used, capped per day. Verify a
+    sending domain in Mailjet and it's enrolled here automatically; an address no longer verified
+    in Mailjet is paused. Cap and pause are the only local overrides.
+    {{ senders | length }} sender{{ '' if (senders | length) == 1 else 's' }} in the pool.</p>
+  </div>
+  <div class="row-actions">
+    <a href="/ui/senders" class="button secondary">Sync from Mailjet</a>
+    <a href="/ui/senders/new" class="button">Add sender</a>
+  </div>
+</div>
+
+{% if sync and sync.error and 'unavailable' not in sync.error and 'not configured' not in sync.error %}
+<p class="flash warn">Couldn't sync from Mailjet ({{ sync.error }}) — showing the last-synced pool.</p>
+{% elif sync and (sync.inserted or sync.deactivated) %}
+<p class="flash ok">Synced from Mailjet: {{ sync.inserted }} enrolled, {{ sync.deactivated }} paused.</p>
+{% endif %}
+
+{% if senders %}
+<section class="card flush">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>From address</th><th>Name</th><th class="num">Today</th>
+            <th class="num">Daily cap</th><th>Status</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for s in senders %}
+        <tr>
+          <td><a href="/ui/senders/{{ s.id }}">{{ s.sender_email }}</a></td>
+          <td>{{ s.sender_name or '—' }}</td>
+          <td class="num">{{ s.sent_today }}</td>
+          <td class="num">{{ s.daily_cap }}</td>
+          <td><span class="badge {{ 'active' if s.active else 'paused' }}">{{ 'active' if s.active else 'paused' }}</span></td>
+          <td class="row-actions">
+            <form method="post" action="/ui/senders/{{ s.id }}/toggle">
+              <button type="submit" class="linklike">{{ 'Pause' if s.active else 'Resume' }}</button>
+            </form>
+            <form method="post" action="/ui/senders/{{ s.id }}/delete"
+                  onsubmit="return confirm('Remove {{ s.sender_email }} from the pool?')">
+              <button type="submit" class="linklike danger">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% else %}
+<p class="empty">No senders yet — <a href="/ui/senders">verify a sending domain in Mailjet</a>
+and it's enrolled here on the next sync, so cold campaigns have something to rotate through.</p>
+{% endif %}
+{% endblock %}

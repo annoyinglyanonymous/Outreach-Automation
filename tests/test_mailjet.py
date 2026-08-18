@@ -26,8 +26,6 @@ TARGET = EmailTarget(
     company="Doe Insurance",
     email_subject="Quick question",
     email_body="Body text",
-    consent_status="cold",
-    smartlead_campaign_id=None,
     sender_email="rojan@renegadeinsurance.com",
     sender_name="Rojan",
 )
@@ -190,3 +188,121 @@ async def test_connect_error_is_retried_then_succeeds(no_backoff):
 
     assert await sender_with(handler).send(TARGET) == "987654321"
     assert attempts["n"] == 2
+
+
+# ---- list_verified_senders: the campaign edit-page sender dropdown -----
+
+# A Mailjet GET /v3/REST/sender listing: verified ('Active') addresses,
+# one pending ('Inactive'), and a wildcard domain sender.
+SENDER_LIST_BODY = {
+    "Count": 4,
+    "Data": [
+        {"Email": "sales@renegadeinsurance.com", "Status": "Active"},
+        {"Email": "automate@renegadeinsurance.com", "Status": "Active"},
+        {"Email": "pending@renegadeinsurance.com", "Status": "Inactive"},
+        {"Email": "*@renegadeinsurance.com", "Status": "Active"},
+    ],
+    "Total": 4,
+}
+
+
+@pytest.mark.asyncio
+async def test_list_verified_senders_returns_only_active_individuals_sorted():
+    """Verified individual addresses only: pending ('Inactive') senders and
+    wildcard domain senders ('*@...', not a usable From) are dropped, and
+    the result is sorted so the dropdown order is stable."""
+    seen = {}
+
+    def handler(request):
+        seen["auth"] = request.headers.get("authorization", "")
+        seen["url"] = str(request.url)
+        seen["method"] = request.method
+        return httpx.Response(200, json=SENDER_LIST_BODY)
+
+    result = await sender_with(handler).list_verified_senders()
+
+    assert result == ["automate@renegadeinsurance.com", "sales@renegadeinsurance.com"]
+    assert seen["method"] == "GET"
+    assert seen["url"] == "https://api.mailjet.com/v3/REST/sender"
+    assert seen["auth"].startswith("Basic ")  # key/secret pair, like send()
+
+
+@pytest.mark.asyncio
+async def test_list_verified_senders_non_200_raises_provider_error():
+    def handler(request):
+        return httpx.Response(401, json={"ErrorMessage": "bad key"})
+
+    with pytest.raises(ProviderError, match="401"):
+        await sender_with(handler).list_verified_senders()
+
+
+@pytest.mark.asyncio
+async def test_list_verified_senders_transport_failure_raises_provider_error():
+    """A dead Mailjet is a ProviderError, never an unhandled exception —
+    the route catches it and degrades the dropdown to manual entry."""
+    def handler(request):
+        raise httpx.ConnectError("connection refused", request=request)
+
+    with pytest.raises(ProviderError, match="unreachable"):
+        await sender_with(handler).list_verified_senders()
+
+
+@pytest.mark.asyncio
+async def test_list_verified_senders_without_keys_makes_no_request():
+    """Unset keys short-circuit before any HTTP — this is what keeps the
+    edit page from hitting the network in tests (and unconfigured installs)."""
+    def handler(request):  # must never be called
+        raise AssertionError("no request expected without keys")
+
+    sender = MailjetSender(api_key="", secret_key="",
+                           transport=httpx.MockTransport(handler))
+    with pytest.raises(ProviderError, match="not configured"):
+        await sender.list_verified_senders()
+
+
+# ---- list_verified_sender_records: names for the auto-enrol pool sync ----
+
+SENDER_RECORDS_BODY = {
+    "Count": 4,
+    "Data": [
+        {"Email": "sales@renegadeinsurance.com", "Name": "Renegade Sales", "Status": "Active"},
+        {"Email": "automate@renegadeinsurance.com", "Name": "", "Status": "Active"},
+        {"Email": "pending@renegadeinsurance.com", "Name": "Later", "Status": "Inactive"},
+        {"Email": "*@renegadeinsurance.com", "Name": "Domain", "Status": "Active"},
+    ],
+    "Total": 4,
+}
+
+
+@pytest.mark.asyncio
+async def test_list_verified_sender_records_carries_names_for_auto_enrol():
+    """The pool auto-enrol sync needs Mailjet's display Name, not just the
+    address, so the From it enrols carries the name Mailjet already knows.
+    Same Active-only / no-wildcard filter and sort as the email projection;
+    a blank Name collapses to None (no display name rather than '')."""
+    def handler(request):
+        return httpx.Response(200, json=SENDER_RECORDS_BODY)
+
+    records = await sender_with(handler).list_verified_sender_records()
+
+    assert records == [
+        {"email": "automate@renegadeinsurance.com", "name": None},
+        {"email": "sales@renegadeinsurance.com", "name": "Renegade Sales"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_verified_senders_is_a_projection_of_the_records():
+    """The email-only helper (the datalist) is exactly the records' emails,
+    so the two can never drift."""
+    def handler(request):
+        return httpx.Response(200, json=SENDER_RECORDS_BODY)
+
+    sender = sender_with(handler)
+    records = await sender.list_verified_sender_records()
+
+    def handler2(request):
+        return httpx.Response(200, json=SENDER_RECORDS_BODY)
+
+    emails = await sender_with(handler2).list_verified_senders()
+    assert emails == [r["email"] for r in records]

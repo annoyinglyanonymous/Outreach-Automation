@@ -2,7 +2,7 @@
 
 Python/FastAPI outreach pipeline: ingest contacts → find LinkedIn
 profiles (Apollo) → scrape them (Apify) → AI-verify the match → draft
-copy (LLM) → human review → send (Mailjet/Resend). ~800–900 contacts
+copy (LLM) → human review → send (Mailjet). ~800–900 contacts
 per campaign; **correctness and message quality matter far more than
 speed.** See `README.md` for the full architecture and failure
 semantics — it is unusually detailed and is the source of truth.
@@ -18,7 +18,7 @@ semantics — it is unusually detailed and is the source of truth.
 
 New vendor code takes a `transport: httpx.AsyncBaseTransport | None`
 constructor argument so tests can inject `httpx.MockTransport`. Follow
-`providers/groq.py`.
+`providers/mailjet.py`.
 
 ## Invariants
 

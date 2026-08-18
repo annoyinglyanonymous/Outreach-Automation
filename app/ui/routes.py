@@ -18,11 +18,12 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 # every upload.
 from starlette.datastructures import UploadFile
 
-from .. import campaign_brief, drafting, repo, runs
+from .. import campaign_brief, drafting, emailer, repo, runs
 from ..config import config
 from ..drafting import NOTE_MAX_CHARS
 from ..providers import n8n, supabase_auth
 from ..providers.base import ProviderError
+from ..providers.mailjet import MailjetSender
 from . import router, templates
 from .auth import (
     COOKIE_NAME,
@@ -143,9 +144,8 @@ async def dashboard(request: Request, session: Session = Depends(require_session
 
 @router.get("/fragments/stats", response_class=HTMLResponse)
 async def stats_fragment(request: Request, session: Session = Depends(require_session)):
-    from .. import emailer, scheduler
+    from .. import scheduler
 
-    consents = sorted(emailer.build_senders())
     counts = await repo.status_counts()
     email_counts = await repo.email_status_counts()
     review = await repo.review_counts()
@@ -190,7 +190,7 @@ async def stats_fragment(request: Request, session: Session = Depends(require_se
         "email_counts": email_counts,
         "runs": runs.status(),
         "stuck_sending": await repo.count_stuck_sending(),
-        "unsendable": await repo.unsendable_approved_counts(consents),
+        "unsendable": await repo.unsendable_approved_counts(),
         "scheduler": scheduler.info(),
     })
 
@@ -416,8 +416,14 @@ async def campaigns_page(request: Request, session: Session = Depends(require_se
 
 @router.get("/campaigns/new", response_class=HTMLResponse)
 async def campaign_new(request: Request, session: Session = Depends(require_session)):
+    # Refresh the pool from Mailjet first (best-effort, same as the edit page)
+    # so a just-verified sender shows up in the "Sending mailbox" dropdown
+    # here too, without a detour through the Senders page.
+    await emailer.sync_pool()
     return _page(request, "campaign_new.html", session, "campaigns",
-                 {"form": {}, "error": None})
+                 {"form": {}, "error": None,
+                  # The pool for the optional "Sending mailbox" pin.
+                  "senders": await repo.list_senders()})
 
 
 # Flash outcomes ride the redirect as WHITELISTED enum params only — no
@@ -452,15 +458,46 @@ def _campaign_flashes(request: Request) -> list[dict]:
     return flashes
 
 
+async def _verified_senders() -> tuple[list[str], str | None]:
+    """(verified from-addresses, error). Best-effort: a Mailjet outage or
+    unset keys degrade the sender dropdown to manual entry rather than
+    breaking the edit page, so the ProviderError is returned, not raised."""
+    try:
+        return await MailjetSender().list_verified_senders(), None
+    except ProviderError as exc:
+        log.warning("sender list: %s", exc)
+        return [], str(exc)
+
+
 @router.get("/campaigns/{campaign_id}", response_class=HTMLResponse)
 async def campaign_edit(request: Request, campaign_id: int,
                         session: Session = Depends(require_session)):
     campaign = await repo.get_campaign(campaign_id)
     if campaign is None:
         raise HTTPException(status_code=404)
+    # Keep the pool current with Mailjet's verified senders so the readiness
+    # card is right on first visit too (best-effort — a Mailjet hiccup just
+    # falls back to the last-synced pool). The pool, not a per-campaign
+    # field, decides whether a cold campaign can send.
+    await emailer.sync_pool()
     return _page(request, "campaign_form.html", session, "campaigns",
                  {"campaign": campaign, "error": None,
-                  "flashes": _campaign_flashes(request)})
+                  "flashes": _campaign_flashes(request),
+                  # The pool, offered in the "Sending mailbox" dropdown so a
+                  # campaign can pin to one sender or rotate across all.
+                  "senders": await repo.list_senders(),
+                  # Sends rotate through the sender pool; the campaign is
+                  # ready only when the pool has an active sender.
+                  "pool_active": await repo.count_active_senders() > 0})
+
+
+def _pinned_sender_id(value) -> int | None:
+    """The 'Sending mailbox' choice as a bigint FK, or None to rotate. The
+    empty option (rotate across the pool) and any non-numeric value both mean
+    'no pin'; a numeric id is bound as an int so asyncpg accepts it (a bare
+    string would raise). isdecimal, not isdigit — see the flash-param guard."""
+    text = str(value or "").strip()
+    return int(text) if text.isdecimal() else None
 
 
 async def _campaign_fields(request: Request) -> dict:
@@ -471,6 +508,9 @@ async def _campaign_fields(request: Request) -> dict:
     fields = {f: (str(form.get(f) or "").strip() or None)
               for f in repo.CAMPAIGN_UPDATE_FIELDS}
     fields["status"] = fields["status"] or "active"
+    # pinned_sender_id is a bigint FK, not free text — coerce off the generic
+    # string pass so asyncpg binds an int (or NULL to rotate the pool).
+    fields["pinned_sender_id"] = _pinned_sender_id(form.get("pinned_sender_id"))
     return fields
 
 
@@ -520,13 +560,18 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
     objective = str(form.get("objective") or "").strip()
     sender_name = str(form.get("sender_name") or "").strip() or None
     sender_role = str(form.get("sender_role") or "").strip() or None
+    pinned_sender_id = _pinned_sender_id(form.get("pinned_sender_id"))
     file = form.get("file")
+    # The pool for the "Sending mailbox" dropdown — fetched up front so an
+    # invalid() re-render keeps it populated with the pin choice selected.
+    senders = await repo.list_senders()
 
     def invalid(message: str):
         return _page(request, "campaign_new.html", session, "campaigns", {
             "form": {"name": name, "objective": objective,
-                     "sender_name": sender_name, "sender_role": sender_role},
-            "error": message,
+                     "sender_name": sender_name, "sender_role": sender_role,
+                     "pinned_sender_id": pinned_sender_id},
+            "error": message, "senders": senders,
         }, status_code=422)
 
     if not name:
@@ -547,7 +592,10 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
     # (surfaced, not silently dropped) until its verified Mailjet
     # sender_email is set on the edit page. smartlead_campaign_id is inert.
     fields = {f: "" for f in repo.CAMPAIGN_FIELDS}
-    fields.update({"sender_email": None, "smartlead_campaign_id": None})
+    # NULLs, not "": these are non-text columns (FK / id). pinned_sender_id
+    # is the operator's "Sending mailbox" choice (NULL = rotate the pool).
+    fields.update({"sender_email": None, "smartlead_campaign_id": None,
+                   "pinned_sender_id": pinned_sender_id})
     fields.update(brief)
     fields.update({
         "name": name,
@@ -589,13 +637,16 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
 @router.post("/campaigns/{campaign_id}/preview", response_class=HTMLResponse)
 async def campaign_preview(request: Request, campaign_id: int,
                           session: Session = Depends(require_session)):
-    """Draft one sample email from the brief currently on screen, so the
-    operator can tune tone before the pipeline drafts hundreds. Stateless —
-    it reads the posted (possibly unsaved) brief values, touches no database,
-    and saves nothing. Uses the same drafting path as production."""
+    """Draft one email for a real contact in this campaign from the brief
+    currently on screen, so the operator can tune tone before the pipeline
+    drafts hundreds. Read-only — it reads the posted (possibly unsaved) brief
+    values and one contact, writes nothing, and saves nothing. Uses the same
+    drafting path as production. Falls back to a synthetic sample when the
+    campaign has no contacts ingested yet."""
     check_origin(request)
     campaign = _brief_from_form(await request.form())
-    preview = await drafting.preview_draft(campaign)
+    contact = await repo.get_preview_contact(campaign_id)
+    preview = await drafting.preview_draft(campaign, contact=contact)
     return templates.TemplateResponse(request, "fragments/_preview_result.html",
                                       {"preview": preview})
 
@@ -610,7 +661,10 @@ async def campaign_update(request: Request, campaign_id: int,
     except asyncpg.PostgresError as exc:
         fields["id"] = campaign_id
         return _page(request, "campaign_form.html", session, "campaigns",
-                     {"campaign": fields, "error": str(exc)}, status_code=422)
+                     {"campaign": fields, "error": str(exc),
+                      # Keep the "Sending mailbox" dropdown populated on the
+                      # re-render so the operator's pin choice still shows.
+                      "senders": await repo.list_senders()}, status_code=422)
     if not found:
         raise HTTPException(status_code=404)
     return RedirectResponse(f"/ui/campaigns/{campaign_id}", status_code=303)
@@ -669,3 +723,114 @@ async def campaign_upload(request: Request, campaign_id: int,
     # Contacts just landed at 'pending' — start enrichment immediately.
     runs.nudge("enrich")
     return result({"outcome": outcome, "sent": len(rows), "problems": problems})
+
+
+# ---------------------------------------------------------------------
+# sender pool (Mailjet From-rotation for cold)
+# ---------------------------------------------------------------------
+
+
+def _sender_fields(form) -> dict:
+    """Parse the sender form. daily_cap falls back to the configured default
+    on a blank/garbage value; active is a checkbox (absent = unchecked)."""
+    try:
+        cap = max(0, int(str(form.get("daily_cap") or "").strip()))
+    except ValueError:
+        cap = config.MAILJET_SENDER_DAILY_CAP
+    return {
+        "sender_email": str(form.get("sender_email") or "").strip() or None,
+        "sender_name": str(form.get("sender_name") or "").strip() or None,
+        "active": str(form.get("active") or "").strip().lower()
+        in ("1", "true", "on", "yes"),
+        "daily_cap": cap,
+    }
+
+
+def _sender_form_page(request: Request, session: Session, sender,
+                      error: str | None = None, verified: list[str] | None = None,
+                      sender_error: str | None = None, status_code: int = 200):
+    return _page(request, "sender_form.html", session, "senders", {
+        "sender": sender, "error": error,
+        "verified": verified or [], "sender_error": sender_error,
+        "default_cap": config.MAILJET_SENDER_DAILY_CAP,
+    }, status_code=status_code)
+
+
+@router.get("/senders", response_class=HTMLResponse)
+async def senders_page(request: Request, session: Session = Depends(require_session)):
+    # Loading the page IS the sync: the pool auto-enrols from Mailjet's
+    # verified senders (and the "Sync from Mailjet" button just reloads).
+    # Best-effort — sync_pool swallows a Mailjet outage and the last-synced
+    # pool still renders, with a banner explaining the skip.
+    sync = await emailer.sync_pool()
+    return _page(request, "senders.html", session, "senders",
+                 {"senders": await repo.list_senders(), "sync": sync})
+
+
+@router.get("/senders/new", response_class=HTMLResponse)
+async def sender_new(request: Request, session: Session = Depends(require_session)):
+    verified, sender_error = await _verified_senders()
+    return _sender_form_page(request, session, None,
+                             verified=verified, sender_error=sender_error)
+
+
+@router.post("/senders", response_class=HTMLResponse)
+async def sender_create(request: Request, session: Session = Depends(require_session)):
+    check_origin(request)
+    fields = _sender_fields(await request.form())
+    if not fields["sender_email"]:
+        return _sender_form_page(request, session, fields,
+                                 error="A sender email is required.", status_code=422)
+    try:
+        await repo.create_sender(fields)
+    except asyncpg.UniqueViolationError:
+        return _sender_form_page(request, session, fields,
+                                 error="That address is already in the pool.",
+                                 status_code=422)
+    return RedirectResponse("/ui/senders", status_code=303)
+
+
+@router.get("/senders/{sender_id}", response_class=HTMLResponse)
+async def sender_edit(request: Request, sender_id: int,
+                      session: Session = Depends(require_session)):
+    sender = await repo.get_sender(sender_id)
+    if sender is None:
+        raise HTTPException(status_code=404)
+    return _sender_form_page(request, session, sender)
+
+
+@router.post("/senders/{sender_id}", response_class=HTMLResponse)
+async def sender_update(request: Request, sender_id: int,
+                        session: Session = Depends(require_session)):
+    check_origin(request)
+    fields = _sender_fields(await request.form())
+    stale = {**fields, "id": sender_id}
+    if not fields["sender_email"]:
+        return _sender_form_page(request, session, stale,
+                                 error="A sender email is required.", status_code=422)
+    try:
+        await repo.update_sender(sender_id, fields)
+    except asyncpg.UniqueViolationError:
+        return _sender_form_page(request, session, stale,
+                                 error="That address is already in the pool.",
+                                 status_code=422)
+    return RedirectResponse("/ui/senders", status_code=303)
+
+
+@router.post("/senders/{sender_id}/toggle")
+async def sender_toggle(request: Request, sender_id: int,
+                        session: Session = Depends(require_session)):
+    check_origin(request)
+    sender = await repo.get_sender(sender_id)
+    if sender is None:
+        raise HTTPException(status_code=404)
+    await repo.set_sender_active(sender_id, not sender["active"])
+    return RedirectResponse("/ui/senders", status_code=303)
+
+
+@router.post("/senders/{sender_id}/delete")
+async def sender_delete(request: Request, sender_id: int,
+                        session: Session = Depends(require_session)):
+    check_origin(request)
+    await repo.delete_sender(sender_id)
+    return RedirectResponse("/ui/senders", status_code=303)

@@ -49,6 +49,18 @@ class Drafter(Protocol):
     async def draft(self, system: str, user: str) -> Draft: ...
 
 
+# The drafting output contract, appended to the system prompt by every
+# JSON-mode drafter (currently the n8n webhook): the model returns a bare
+# JSON object, and JSON mode guarantees only syntax, so the shape is pinned
+# here and validated on parse. Lives on the neutral base, not any one
+# vendor, so a provider swap never re-homes it.
+FORMAT_INSTRUCTION = (
+    "\n\nRespond with a single JSON object of exactly this form: "
+    '{"subject": string, "body": string, "linkedin_note": string}. '
+    "No other keys, no markdown fences."
+)
+
+
 class SendRejected(Exception):
     """The vendor hard-rejected this one contact's send (invalid
     recipient, blocklist). An outcome for that contact, not a vendor

@@ -63,25 +63,20 @@ class Config:
 
     # --- drafting (stage 3) -----------------------------------------------
     # Which vendor writes the drafts: "n8n" (an n8n webhook fronting the
-    # org's OpenAI credential), "groq", or "anthropic". All speak through
-    # the same Drafter protocol, so this is the whole switch.
-    DRAFT_PROVIDER: str = os.getenv("DRAFT_PROVIDER", "groq")
+    # org's OpenAI credential) or "anthropic". Both speak through the same
+    # Drafter protocol, so this is the whole switch. Only n8n exposes the
+    # complete_json that verification and brief-expansion also reuse.
+    DRAFT_PROVIDER: str = os.getenv("DRAFT_PROVIDER", "n8n")
     # The n8n LLM webhook (docs/n8n-llm-workflow.json): takes
     # {system, user}, answers with the model's JSON object.
     N8N_LLM_URL: str = os.getenv("N8N_LLM_URL", "")
-    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
-    # Empty means each provider's own default (groq: openai/gpt-oss-120b,
-    # anthropic: claude-opus-4-8) — a bare provider switch never carries
-    # the other vendor's model name across.
+    # Empty means the provider's own default (anthropic: claude-opus-4-8);
+    # the n8n workflow owns its model, so this does not apply to it.
     DRAFT_MODEL: str = os.getenv("DRAFT_MODEL", "")
     DRAFT_EFFORT: str = os.getenv("DRAFT_EFFORT", "high")
-    # Two constraints bound this from live failures (2026-08-10):
-    # - Groq's on-demand tier counts prompt + max_tokens against an
-    #   8000 TPM budget PER REQUEST: reserving 8000 made every call 413.
-    # - gpt-oss spends the budget on REASONING before emitting JSON:
-    #   2000 produced empty generations (400 json_validate_failed).
-    # 4000 + a ~2000-token profile prompt fits the tier with headroom.
+    # Bounds generation for the anthropic provider; the n8n workflow owns
+    # its own generation limits and ignores this.
     DRAFT_MAX_TOKENS: int = _int("DRAFT_MAX_TOKENS", 4000)
     DRAFT_BATCH_SIZE: int = _int("DRAFT_BATCH_SIZE", 25)
     # Cap on the profile JSON passed into the prompt; beyond this the
@@ -100,35 +95,16 @@ class Config:
     VERIFY_BATCH_SIZE: int = _int("VERIFY_BATCH_SIZE", 25)
 
     # --- email sending (stage 4) -------------------------------------------
-    # Cold campaigns send via Mailjet, opted-in via Resend; the claim only
-    # picks consents whose key is configured, so either can be deployed
-    # alone. Mailjet uses a key/secret pair (HTTP Basic auth). Smartlead is
-    # retained as a cutover fallback (used for cold only if the Mailjet
-    # pair is unset).
+    # Mailjet is the only send provider; every approved draft goes out
+    # through it, rotating its From across the global sender pool. Mailjet
+    # uses a key/secret pair (HTTP Basic auth).
     MAILJET_API_KEY: str = os.getenv("MAILJET_API_KEY", "")
     MAILJET_SECRET_KEY: str = os.getenv("MAILJET_SECRET_KEY", "")
-    SMARTLEAD_API_KEY: str = os.getenv("SMARTLEAD_API_KEY", "")
-    RESEND_API_KEY: str = os.getenv("RESEND_API_KEY", "")
+    # Default daily cap for a newly-added rotation sender (migration 010) —
+    # a fresh, unwarmed domain's ramp starting point, raised per-sender over
+    # the first weeks.
+    MAILJET_SENDER_DAILY_CAP: int = _int("MAILJET_SENDER_DAILY_CAP", 25)
     SEND_BATCH_SIZE: int = _int("SEND_BATCH_SIZE", 25)
-
-    # Defaults applied when campaign creation auto-builds the Smartlead
-    # campaign (shell sequence + mailboxes + schedule + activate).
-    # Recipients are US insurance agents, so the schedule is US business
-    # hours regardless of where the operator sits; the daily cap is
-    # deliberately conservative for warmed-mailbox safety.
-    SMARTLEAD_SCHEDULE_TIMEZONE: str = os.getenv(
-        "SMARTLEAD_SCHEDULE_TIMEZONE", "America/New_York")
-    SMARTLEAD_SCHEDULE_DAYS: tuple[int, ...] = tuple(
-        int(d.strip())
-        for d in os.getenv("SMARTLEAD_SCHEDULE_DAYS", "1,2,3,4,5").split(",")
-        if d.strip()
-    )
-    SMARTLEAD_SCHEDULE_START_HOUR: str = os.getenv(
-        "SMARTLEAD_SCHEDULE_START_HOUR", "09:00")
-    SMARTLEAD_SCHEDULE_END_HOUR: str = os.getenv(
-        "SMARTLEAD_SCHEDULE_END_HOUR", "17:00")
-    SMARTLEAD_MAX_NEW_LEADS_PER_DAY: int = _int("SMARTLEAD_MAX_NEW_LEADS_PER_DAY", 20)
-    SMARTLEAD_MIN_TIME_BTW_EMAILS: int = _int("SMARTLEAD_MIN_TIME_BTW_EMAILS", 10)
 
     # --- scheduler (automation) -------------------------------------------
     # Off by default: the pipeline stays fully manual until you opt in, so a
@@ -194,32 +170,27 @@ class Config:
         """Same pattern as scraping: checked at /draft/run, not startup."""
         if cls.DRAFT_PROVIDER == "n8n":
             return [] if cls.N8N_LLM_URL else ["N8N_LLM_URL"]
-        if cls.DRAFT_PROVIDER == "groq":
-            return [] if cls.GROQ_API_KEY else ["GROQ_API_KEY"]
         return [] if cls.ANTHROPIC_API_KEY else ["ANTHROPIC_API_KEY"]
 
     @classmethod
     def missing_verify_vars(cls) -> list[str]:
         """Non-empty means the verify stage is skipped (nudge + scheduler),
         so scrape's completion nudge walks past it straight to draft.
-        Reuses the drafting LLM route — only n8n and groq expose the
-        complete_json a verdict needs."""
+        Reuses the drafting LLM route — only n8n exposes the complete_json a
+        verdict needs."""
         if not cls.VERIFY_ENABLED:
             return ["VERIFY_ENABLED (off)"]
         if cls.DRAFT_PROVIDER == "n8n":
             return [] if cls.N8N_LLM_URL else ["N8N_LLM_URL"]
-        if cls.DRAFT_PROVIDER == "groq":
-            return [] if cls.GROQ_API_KEY else ["GROQ_API_KEY"]
-        return ["DRAFT_PROVIDER=n8n or groq (for verification)"]
+        return ["DRAFT_PROVIDER=n8n (for verification)"]
 
     @classmethod
     def missing_email_vars(cls) -> list[str]:
-        """Non-empty only when NO send path is configured at all — one
-        key (or the Mailjet pair) is enough to run that consent's queue."""
-        if ((cls.MAILJET_API_KEY and cls.MAILJET_SECRET_KEY)
-                or cls.SMARTLEAD_API_KEY or cls.RESEND_API_KEY):
+        """Non-empty only when Mailjet — the sole send provider — isn't
+        configured; the stage then no-ops."""
+        if cls.MAILJET_API_KEY and cls.MAILJET_SECRET_KEY:
             return []
-        return ["MAILJET_API_KEY+MAILJET_SECRET_KEY, RESEND_API_KEY, or SMARTLEAD_API_KEY"]
+        return ["MAILJET_API_KEY+MAILJET_SECRET_KEY"]
 
     @classmethod
     def missing_ui_vars(cls) -> list[str]:

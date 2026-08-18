@@ -33,10 +33,16 @@ class EmailTarget:
     company: str | None
     email_subject: str
     email_body: str
-    consent_status: str | None
-    smartlead_campaign_id: str | None
+    # The From identity — NOT set by the claim. Mailjet is the only sender
+    # and the global rotation pool owns the From, stamped on at send time
+    # by claim_rotating_sender (emailer._send_batch).
     sender_email: str | None
     sender_name: str | None
+    # migration 011: the campaign's optional single-mailbox pin, joined in
+    # by the claim. NULL = draw the From from the rotation pool (default);
+    # an id pins every send for this campaign to that one sender (still
+    # capped) via claim_pinned_sender instead of claim_rotating_sender.
+    pinned_sender_id: int | None = None
 
 
 @dataclass(slots=True)
@@ -450,6 +456,38 @@ async def claim_draft_batch(limit: int | None = None) -> list[DraftTarget]:
     ]
 
 
+# One real contact for the edit-page preview. Read-only — it claims and
+# writes nothing (a preview must not touch pipeline state). Prefers a
+# scraped contact (profile_data present) so the personalised preview is
+# genuine rather than the fallback template, then the newest. campaign is
+# left empty; the preview overlays the on-screen (possibly unsaved) brief.
+PREVIEW_CONTACT_SQL = """
+SELECT id, email, first_name, last_name, company, title,
+       linkedin_url, profile_data
+  FROM contacts
+ WHERE campaign_id = $1
+ ORDER BY (profile_data IS NOT NULL) DESC, created_at DESC
+ LIMIT 1;
+"""
+
+
+async def get_preview_contact(campaign_id: int) -> DraftTarget | None:
+    row = await pool().fetchrow(PREVIEW_CONTACT_SQL, campaign_id)
+    if row is None:
+        return None
+    return DraftTarget(
+        id=row["id"],
+        email=row["email"],
+        first_name=row["first_name"],
+        last_name=row["last_name"],
+        company=row["company"],
+        title=row["title"],
+        linkedin_url=row["linkedin_url"],
+        profile_data=_jsonb(row["profile_data"]),
+        campaign={},
+    )
+
+
 # email_status only advances from 'pending': a re-draft must never
 # regress a contact whose email is already sending or sent. The review
 # fields reset on every write so an approval can never outlive the copy
@@ -546,48 +584,48 @@ async def reset_stale_draft_claims() -> int:
 # counted, surfaced, and resolved by a human instead.
 # =====================================================================
 
-# The claim picks only rows that can actually send right now: active
-# campaign, a consent path whose API key is configured ($1), and a verified
-# sender address on the campaign. Both send paths are now transactional
-# ESPs (cold -> Mailjet, opted_in -> Resend) that send from a verified
-# sender_email, so the readiness column is the same for both. Misconfigured
-# campaigns are never claimed (see unsendable_approved_counts) so they
-# cannot starve others.
+# The claim picks only rows that can actually send right now: an approved
+# draft on an active campaign, with a matching sender that has remaining
+# daily capacity (Mailjet is the only sender). The capacity EXISTS is now
+# PER-CAMPAIGN: a rotating campaign (pinned_sender_id IS NULL) needs any
+# active sender with room; a pinned campaign needs ITS one sender to be
+# active with room — so a pinned campaign whose mailbox is capped stops
+# claiming while other campaigns keep sending. A merely-capped sender stops
+# claiming (paced, retried when caps reset); an EMPTY pool / a paused pin is
+# surfaced by unsendable_approved_counts. Suppressed addresses are never
+# claimed. The From is stamped on at send time; the pin is carried through
+# so emailer._send_batch knows which sender to draw for each contact.
 CLAIM_EMAIL_SQL = """
 WITH claimed AS (
-    SELECT c.id
+    SELECT c.id, g.pinned_sender_id
       FROM contacts c
       JOIN campaigns g ON g.id = c.campaign_id
      WHERE c.email_status = 'drafted'
        AND c.review_status = 'approved'
        AND g.status = 'active'
-       AND g.consent_status = ANY($1::text[])
-       AND g.sender_email IS NOT NULL
+       AND EXISTS (SELECT 1 FROM mailjet_senders m
+                    WHERE m.active
+                      AND (m.day < current_date OR m.sent_today < m.daily_cap)
+                      AND (g.pinned_sender_id IS NULL
+                           OR m.id = g.pinned_sender_id))
        AND NOT EXISTS (SELECT 1 FROM suppression s
                         WHERE lower(s.email) = lower(c.email))
      ORDER BY c.created_at
-     LIMIT $2
+     LIMIT $1
      FOR UPDATE OF c SKIP LOCKED
 )
 UPDATE contacts c
    SET email_status   = 'sending',
        last_action_at = now()
-  FROM claimed, campaigns g
+  FROM claimed
  WHERE c.id = claimed.id
-   AND g.id = c.campaign_id
 RETURNING c.id, c.email, c.first_name, c.last_name, c.company,
-          c.email_subject, c.email_body,
-          g.consent_status, g.smartlead_campaign_id, g.sender_email,
-          g.sender_name;
+          c.email_subject, c.email_body, claimed.pinned_sender_id;
 """
 
 
-async def claim_email_batch(consents: list[str],
-                            limit: int | None = None) -> list[EmailTarget]:
-    if not consents:
-        return []
-    rows = await pool().fetch(CLAIM_EMAIL_SQL, consents,
-                              limit or config.SEND_BATCH_SIZE)
+async def claim_email_batch(limit: int | None = None) -> list[EmailTarget]:
+    rows = await pool().fetch(CLAIM_EMAIL_SQL, limit or config.SEND_BATCH_SIZE)
     return [
         EmailTarget(
             id=r["id"],
@@ -597,10 +635,9 @@ async def claim_email_batch(consents: list[str],
             company=r["company"],
             email_subject=r["email_subject"],
             email_body=r["email_body"],
-            consent_status=r["consent_status"],
-            smartlead_campaign_id=r["smartlead_campaign_id"],
-            sender_email=r["sender_email"],
-            sender_name=r["sender_name"],
+            sender_email=None,   # the rotation pool sets this at send time
+            sender_name=None,
+            pinned_sender_id=r["pinned_sender_id"],
         )
         for r in rows
     ]
@@ -714,33 +751,38 @@ SELECT g.name AS campaign_name,
        CASE
          WHEN g.status <> 'active'
              THEN 'campaign not active'
-         WHEN NOT (g.consent_status = ANY($1::text[]))
-             THEN 'no API key configured for consent ' || coalesce(g.consent_status, 'NULL')
-         WHEN g.sender_email IS NULL
-             THEN 'missing sender_email'
-         ELSE 'unsupported consent ' || coalesce(g.consent_status, 'NULL')
+         WHEN g.pinned_sender_id IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM mailjet_senders m
+                               WHERE m.id = g.pinned_sender_id AND m.active)
+             THEN 'pinned sender inactive'
+         WHEN NOT EXISTS (SELECT 1 FROM mailjet_senders m WHERE m.active)
+             THEN 'no active senders in the rotation pool'
+         ELSE 'unsendable'
        END AS reason,
        count(*)::int AS contacts
   FROM contacts c
   JOIN campaigns g ON g.id = c.campaign_id
  WHERE c.email_status = 'drafted'
    AND c.review_status = 'approved'
-   -- IS NOT TRUE, not NOT (...): with consent_status NULL the whole
-   -- predicate is NULL, and NOT NULL is NULL — so a campaign with no
-   -- consent set would be filtered out of this report while also never
-   -- being claimed, i.e. silently stuck with nothing to explain it. The
-   -- CASE above already has a branch naming that case; this is what lets
-   -- it be reached.
+   -- The negation of the claim's sendable predicate. Sender ACTIVE-existence
+   -- (not remaining capacity): a paused/empty sender is a permanent misconfig
+   -- worth naming, but a merely-capped one is transient pacing and must NOT be
+   -- reported as unsendable (it resolves when the daily counters reset). The
+   -- matched-sender EXISTS mirrors CLAIM_EMAIL_SQL's per-campaign gate, so a
+   -- campaign pinned to a paused mailbox is surfaced even while the pool has
+   -- other active senders.
    AND (g.status = 'active'
-    AND g.consent_status = ANY($1::text[])
-    AND g.sender_email IS NOT NULL) IS NOT TRUE
+    AND EXISTS (SELECT 1 FROM mailjet_senders m
+                 WHERE m.active
+                   AND (g.pinned_sender_id IS NULL
+                        OR m.id = g.pinned_sender_id))) IS NOT TRUE
  GROUP BY 1, 2
  ORDER BY 1, 2;
 """
 
 
-async def unsendable_approved_counts(consents: list[str]) -> list[dict]:
-    rows = await pool().fetch(UNSENDABLE_APPROVED_SQL, consents)
+async def unsendable_approved_counts() -> list[dict]:
+    rows = await pool().fetch(UNSENDABLE_APPROVED_SQL)
     return [dict(r) for r in rows]
 
 
@@ -1157,6 +1199,10 @@ CAMPAIGN_FIELDS = (
     "fallback_email_subject", "fallback_email_body",
     # migration 005: per-campaign send configuration
     "sender_email", "smartlead_campaign_id",
+    # migration 011: optional single-mailbox pin (NULL = rotate the pool).
+    # Not smartlead_campaign_id, so it IS in CAMPAIGN_UPDATE_FIELDS — the
+    # edit form owns it.
+    "pinned_sender_id",
 )
 
 # Everything the edit form owns — i.e. CAMPAIGN_FIELDS minus
@@ -1254,6 +1300,231 @@ async def delete_campaign(campaign_id: int) -> bool:
             row = await conn.fetchrow(
                 "DELETE FROM campaigns WHERE id = $1 RETURNING id;", campaign_id
             )
+    return row is not None
+
+
+# =====================================================================
+# mailjet sender pool (migration 010) — the global From-rotation pool for
+# cold sends. sent_today/day/last_used_at are runtime state the runner
+# writes via claim_rotating_sender; the CRUD below owns only the operator-
+# editable fields.
+# =====================================================================
+
+# The identity + policy fields the admin UI creates/edits. Runtime state
+# (sent_today, day, last_used_at) is NOT here — it is written only by the
+# atomic pick/release, never a form.
+MAILJET_SENDER_FIELDS = ("sender_email", "sender_name", "active", "daily_cap")
+
+CREATE_SENDER_SQL = f"""
+INSERT INTO mailjet_senders ({", ".join(MAILJET_SENDER_FIELDS)})
+VALUES ({", ".join(f"${i + 1}" for i in range(len(MAILJET_SENDER_FIELDS)))})
+RETURNING id;
+"""
+
+UPDATE_SENDER_SQL = f"""
+UPDATE mailjet_senders
+   SET {", ".join(f"{f} = ${i + 2}" for i, f in enumerate(MAILJET_SENDER_FIELDS))}
+ WHERE id = $1
+RETURNING id;
+"""
+
+# Today-aware sent_today for display: a row whose counter predates today
+# reads as 0, because the pick resets it lazily on first use each day.
+LIST_SENDERS_SQL = """
+SELECT id, sender_email, sender_name, active, daily_cap,
+       CASE WHEN day < current_date THEN 0 ELSE sent_today END AS sent_today,
+       last_used_at, created_at
+  FROM mailjet_senders
+ ORDER BY sender_email;
+"""
+
+
+async def create_sender(fields: dict) -> int:
+    row = await pool().fetchrow(
+        CREATE_SENDER_SQL, *[fields.get(f) for f in MAILJET_SENDER_FIELDS]
+    )
+    return row["id"]
+
+
+async def update_sender(sender_id: int, fields: dict) -> bool:
+    row = await pool().fetchrow(
+        UPDATE_SENDER_SQL, sender_id,
+        *[fields.get(f) for f in MAILJET_SENDER_FIELDS]
+    )
+    return row is not None
+
+
+async def get_sender(sender_id: int) -> dict | None:
+    row = await pool().fetchrow(
+        "SELECT * FROM mailjet_senders WHERE id = $1;", sender_id
+    )
+    return dict(row) if row else None
+
+
+async def list_senders() -> list[dict]:
+    return [dict(r) for r in await pool().fetch(LIST_SENDERS_SQL)]
+
+
+async def set_sender_active(sender_id: int, active: bool) -> bool:
+    """Single-column kill switch — pull a degrading domain from rotation
+    without touching its cap/counters."""
+    row = await pool().fetchrow(
+        "UPDATE mailjet_senders SET active = $2 WHERE id = $1 RETURNING id;",
+        sender_id, active,
+    )
+    return row is not None
+
+
+async def delete_sender(sender_id: int) -> bool:
+    row = await pool().fetchrow(
+        "DELETE FROM mailjet_senders WHERE id = $1 RETURNING id;", sender_id
+    )
+    return row is not None
+
+
+async def count_active_senders() -> int:
+    return await pool().fetchval(
+        "SELECT count(*)::int FROM mailjet_senders WHERE active;"
+    )
+
+
+# Full auto-enrol: Mailjet's verified sender list IS the pool membership.
+# A verified address not in the pool is enrolled (active, at the default
+# cap); an active pool row whose address is no longer verified is PAUSED
+# (kept — its counters/history stay — but dropped from rotation). Existing
+# rows are otherwise untouched: an operator's cap bump or manual pause of a
+# still-verified sender survives every sync (the INSERT only fires for
+# missing addresses; nothing here sets active = true on an existing row).
+# The two data-modifying CTEs run against one snapshot, and their target
+# rows are disjoint (ins → addresses in `incoming`; deact → addresses NOT
+# in `incoming`), so they never fight.
+SYNC_SENDERS_SQL = """
+WITH incoming AS (
+    SELECT lower(e) AS lemail, e AS email, n AS name
+      FROM unnest($1::text[], $2::text[]) AS t(e, n)
+),
+ins AS (
+    INSERT INTO mailjet_senders (sender_email, sender_name, active, daily_cap)
+    SELECT i.email, i.name, true, $3::int
+      FROM incoming i
+     WHERE NOT EXISTS (
+        SELECT 1 FROM mailjet_senders m WHERE lower(m.sender_email) = i.lemail)
+    RETURNING 1
+),
+deact AS (
+    UPDATE mailjet_senders m
+       SET active = false
+     WHERE m.active
+       AND NOT EXISTS (
+        SELECT 1 FROM incoming i WHERE i.lemail = lower(m.sender_email))
+    RETURNING 1
+)
+SELECT (SELECT count(*)::int FROM ins)   AS inserted,
+       (SELECT count(*)::int FROM deact) AS deactivated;
+"""
+
+
+async def sync_senders_from_mailjet(records: list[dict], default_cap: int) -> dict:
+    """Reconcile the rotation pool against Mailjet's verified senders.
+
+    ``records`` is ``[{"email", "name"}]`` from
+    MailjetSender.list_verified_sender_records. Returns
+    ``{"inserted", "deactivated"}``. See SYNC_SENDERS_SQL for the
+    auto-enrol semantics (new → enrolled at default_cap, unverified →
+    paused, existing overrides preserved). Callers sync best-effort — a
+    Mailjet outage means no records to reconcile against, so they skip
+    this rather than pass an empty list (which would pause the whole pool).
+    """
+    emails = [r["email"] for r in records]
+    names = [r.get("name") for r in records]
+    row = await pool().fetchrow(SYNC_SENDERS_SQL, emails, names, default_cap)
+    return {"inserted": row["inserted"], "deactivated": row["deactivated"]}
+
+
+# Atomically pick the least-recently-used active sender that still has room
+# today, and count the send against it — the same FOR UPDATE SKIP LOCKED /
+# CTE shape as the contact claims, so two concurrent workers can never
+# over-send a domain's daily cap. The daily reset is folded into the
+# UPDATE (CASE on day < current_date), so no cron resets counters. Returns
+# None when the whole pool is at cap for today (the runner then paces).
+CLAIM_ROTATING_SENDER_SQL = """
+WITH picked AS (
+    SELECT id
+      FROM mailjet_senders
+     WHERE active
+       AND (day < current_date OR sent_today < daily_cap)
+     ORDER BY last_used_at NULLS FIRST, id
+     LIMIT 1
+     FOR UPDATE SKIP LOCKED
+)
+UPDATE mailjet_senders m
+   SET sent_today   = CASE WHEN m.day < current_date THEN 1
+                           ELSE m.sent_today + 1 END,
+       day          = current_date,
+       last_used_at = now()
+  FROM picked
+ WHERE m.id = picked.id
+RETURNING m.sender_email, m.sender_name;
+"""
+
+
+async def claim_rotating_sender() -> dict | None:
+    row = await pool().fetchrow(CLAIM_ROTATING_SENDER_SQL)
+    if row is None:
+        return None
+    return {"sender_email": row["sender_email"], "sender_name": row["sender_name"]}
+
+
+# The single-mailbox counterpart to claim_rotating_sender, for a campaign
+# pinned to one sender (migration 011). Same atomic count-and-stamp shape —
+# FOR UPDATE SKIP LOCKED, the same lazy daily reset — but scoped to ONE id
+# instead of picking LRU across the pool, so the per-domain daily cap is
+# still enforced. Returns None when that sender is paused, missing, or at
+# its cap today (the runner then leaves the contact for the next window). A
+# rejected/failed send gives the slot back via release_rotating_sender,
+# which is keyed on the same email and so serves both pick paths.
+CLAIM_PINNED_SENDER_SQL = """
+WITH picked AS (
+    SELECT id
+      FROM mailjet_senders
+     WHERE id = $1
+       AND active
+       AND (day < current_date OR sent_today < daily_cap)
+     FOR UPDATE SKIP LOCKED
+)
+UPDATE mailjet_senders m
+   SET sent_today   = CASE WHEN m.day < current_date THEN 1
+                           ELSE m.sent_today + 1 END,
+       day          = current_date,
+       last_used_at = now()
+  FROM picked
+ WHERE m.id = picked.id
+RETURNING m.sender_email, m.sender_name;
+"""
+
+
+async def claim_pinned_sender(sender_id: int) -> dict | None:
+    row = await pool().fetchrow(CLAIM_PINNED_SENDER_SQL, sender_id)
+    if row is None:
+        return None
+    return {"sender_email": row["sender_email"], "sender_name": row["sender_name"]}
+
+
+# Undo a pick's increment when the send did NOT go out (SendRejected /
+# ProviderError). Guarded on day = current_date so a counter that has since
+# rolled over is left alone, and floored at 0. A send whose outcome is
+# UNCERTAIN is deliberately NOT released — the increment stands.
+RELEASE_ROTATING_SENDER_SQL = """
+UPDATE mailjet_senders
+   SET sent_today = GREATEST(sent_today - 1, 0)
+ WHERE lower(sender_email) = lower($1)
+   AND day = current_date
+RETURNING id;
+"""
+
+
+async def release_rotating_sender(sender_email: str) -> bool:
+    row = await pool().fetchrow(RELEASE_ROTATING_SENDER_SQL, sender_email)
     return row is not None
 
 

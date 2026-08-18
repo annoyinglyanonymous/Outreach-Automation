@@ -2,9 +2,9 @@
 campaign brief (offer, CTA, tone, audience rationale) plus the fallback
 email template.
 
-No HTTP here — the Groq transport lives in providers/groq.py, mirroring
-the drafting.py split. Expansion is best-effort by contract: ANY failure
-(provider down, wrong shape, no key, non-groq DRAFT_PROVIDER) degrades to
+No HTTP here — the transport lives in providers/n8n_llm.py, mirroring the
+drafting.py split. Expansion is best-effort by contract: ANY failure
+(provider down, wrong shape, no URL, non-n8n DRAFT_PROVIDER) degrades to
 `fallback_brief`, because campaign creation must never fail on a vendor.
 """
 from __future__ import annotations
@@ -69,16 +69,13 @@ async def expand_objective(objective: str, sender_name: str | None,
                            expander=None) -> tuple[dict, str]:
     """Returns (brief fields, source) where source is 'llm' or 'fallback'.
     Never raises — see module docstring."""
-    # The expander is whichever configured provider exposes
-    # complete_json (n8n webhook or groq); anthropic or missing config
-    # degrades to the fallback brief — campaigns always create.
+    # The expander is the n8n webhook (the only provider exposing
+    # complete_json); anthropic or missing config degrades to the fallback
+    # brief — campaigns always create.
     if expander is None:
         if config.DRAFT_PROVIDER == "n8n" and config.N8N_LLM_URL:
             from .providers.n8n_llm import N8nDrafter
             expander = N8nDrafter()
-        elif config.DRAFT_PROVIDER == "groq" and config.GROQ_API_KEY:
-            from .providers.groq import GroqDrafter
-            expander = GroqDrafter()
         else:
             return fallback_brief(objective), "fallback"
 

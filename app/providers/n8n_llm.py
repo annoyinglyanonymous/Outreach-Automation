@@ -17,8 +17,7 @@ import logging
 import httpx
 
 from ..config import config
-from .base import Draft, ProviderError
-from .groq import FORMAT_INSTRUCTION
+from .base import FORMAT_INSTRUCTION, Draft, ProviderError
 
 log = logging.getLogger(__name__)
 
@@ -50,8 +49,8 @@ class N8nDrafter:
 
     async def complete_json(self, system: str, user: str,
                             max_tokens: int | None = None) -> dict:
-        """max_tokens is accepted for interface parity with the groq
-        provider but ignored — the n8n workflow owns generation limits."""
+        """max_tokens is accepted for interface parity with the Drafter
+        protocol but ignored — the n8n workflow owns generation limits."""
         if not self.url:
             raise ProviderError("n8n llm: N8N_LLM_URL is not configured")
 

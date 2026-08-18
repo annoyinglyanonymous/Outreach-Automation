@@ -86,7 +86,7 @@ async def root() -> dict:
             "POST /enrich/run": "start an enrichment run (requires x-api-key header)",
             "POST /scrape/run": "collect finished Apify runs, start new ones (requires x-api-key header)",
             "POST /draft/run": "draft emails + LinkedIn notes for scraped contacts (requires x-api-key header)",
-            "POST /email/run": "send approved drafts via Mailjet (cold) / Resend (opted-in) (requires x-api-key header)",
+            "POST /email/run": "send approved drafts via Mailjet, rotating the From across the sender pool (requires x-api-key header)",
         },
     }
 
@@ -101,16 +101,13 @@ async def health() -> dict:
 @app.get("/stats")
 async def stats(x_api_key: str | None = Header(default=None)) -> dict:
     _require_key(x_api_key)
-    from . import emailer
-
-    consents = sorted(emailer.build_senders())
     return {
         "linkedin_status": await repo.status_counts(),
         "email_status": await repo.email_status_counts(),
         "review": await repo.review_counts(),
         "apify_runs_in_flight": len(await repo.pending_runs()),
         "stuck_sending": await repo.count_stuck_sending(),
-        "unsendable": await repo.unsendable_approved_counts(consents),
+        "unsendable": await repo.unsendable_approved_counts(),
         "runs": runs.status(),
         "scheduler": scheduler.info(),
     }

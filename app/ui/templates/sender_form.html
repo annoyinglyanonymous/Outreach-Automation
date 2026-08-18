@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Edit' if sender and sender.get('id') else 'Add' }} sender — Outreach{% endblock %}
+{% block crumb %}Senders{% endblock %}
+{% block content %}
+{% set editing = sender and sender.get('id') %}
+<div class="page-head">
+  <div>
+    <h1>{{ 'Edit sender' if editing else 'Add sender' }}</h1>
+    <p class="hint"><a href="/ui/senders">Senders</a> / {{ 'Edit' if editing else 'Add' }}</p>
+  </div>
+</div>
+
+{% if error %}<p class="flash error">{{ error }}</p>{% endif %}
+
+<form method="post" action="{{ '/ui/senders/' ~ sender.id if editing else '/ui/senders' }}" class="campaign-form">
+  <div class="columns">
+    <div class="col">
+      <label>From address
+        <span class="sub">A Mailjet-validated sending address; its domain must be verified
+        (SPF/DKIM) in Mailjet.</span>
+        {% if verified and not sender_error %}
+        <input name="sender_email" list="verified-senders" type="email"
+               value="{{ (sender.sender_email or '') if sender else '' }}" required>
+        <datalist id="verified-senders">
+          {% for v in verified %}<option value="{{ v }}">{% endfor %}
+        </datalist>
+        <span class="sub">Pick one of Mailjet's verified addresses, or type another.</span>
+        {% else %}
+        <input name="sender_email" type="email"
+               value="{{ (sender.sender_email or '') if sender else '' }}" required>
+        {% if sender_error %}
+        <span class="sub">Couldn't load verified senders from Mailjet ({{ sender_error }}) — enter the address manually.</span>
+        {% endif %}
+        {% endif %}
+      </label>
+      <label>Display name <span class="sub">Optional — the From name recipients see.</span>
+        <input name="sender_name" value="{{ (sender.sender_name or '') if sender else '' }}"></label>
+    </div>
+    <div class="col">
+      <label>Daily cap
+        <span class="sub">Cold sends per day from this domain. Start low for a fresh domain
+        ({{ default_cap }}) and raise it over the first weeks as reputation builds.</span>
+        <input name="daily_cap" type="number" min="0"
+               value="{{ sender.daily_cap if editing else default_cap }}"></label>
+      <label style="flex-direction:row; align-items:center; gap:8px">
+        <input type="checkbox" name="active" style="width:auto; min-height:0"
+               {{ 'checked' if (sender.active if editing else True) }}>
+        Active — include in rotation</label>
+    </div>
+  </div>
+  <button type="submit">{{ 'Save changes' if editing else 'Add sender' }}</button>
+</form>
+
+{% if editing %}
+<section class="card" style="margin-top:24px">
+  <div class="card-head"><h2>Danger zone</h2></div>
+  <p class="hint">Removes this sender from the pool. Emails already dispatched are unaffected;
+  future cold sends stop rotating through it.</p>
+  <form method="post" action="/ui/senders/{{ sender.id }}/delete"
+        onsubmit="return confirm('Remove this sender from the pool?')">
+    <button type="submit" class="danger">Delete sender</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

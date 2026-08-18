@@ -15,13 +15,14 @@
 <p class="flash {{ f.level }}">{{ f.text }}</p>
 {% endfor %}
 
-{% if editing and campaign.consent_status == 'cold' and not campaign.sender_email %}
+{% if editing and not pool_active %}
 <section class="card" style="margin-bottom:24px">
   <div class="card-head"><h2>Not ready to send</h2></div>
-  <p class="hint">This cold campaign sends via Mailjet but has no sender email yet, so
-  approved drafts can't go out. Set <strong>Sender email</strong> below to a
-  Mailjet-verified from-address (its domain must have SPF/DKIM verified in Mailjet).
-  Until then the campaign is listed as “approved but unsendable”, never silently dropped.</p>
+  <p class="hint">Every send rotates its from-address through senders verified in Mailjet, and
+  the pool has none active right now — so approved drafts can't go out. Verify a sending domain
+  (SPF/DKIM) in your Mailjet account; it's enrolled automatically — review the pool on the
+  <a href="/ui/senders">Senders</a> page. Until one is active, approved contacts are listed as
+  “approved but unsendable”, never silently dropped.</p>
 </section>
 {% endif %}
 
@@ -31,11 +32,11 @@
     <div class="col">
       <label>Name <input name="name" value="{{ campaign.name if campaign else '' }}" required></label>
       <label>Status <input name="status" value="{{ campaign.status if campaign else 'active' }}"></label>
-      {# A select, not free text: this field routes real sends (cold →
-         Smartlead, opted_in → Resend) and a typo would silently make the
-         campaign unsendable. #}
+      {# A select, not free text: the schema's CHECK constrains this column
+         and a typo would fail a live create. It is a compliance/record
+         field only — every send goes through Mailjet regardless. #}
       {% set consent = (campaign.consent_status if campaign else 'cold') or 'cold' %}
-      <label>Consent status <span class="sub">Decides the send vendor: cold → Mailjet, opted_in → Resend</span>
+      <label>Consent status <span class="sub">Consent basis for these contacts (record only) — all sends go through Mailjet</span>
         <select name="consent_status">
           <option value="cold" {% if consent == 'cold' %}selected{% endif %}>cold</option>
           <option value="opted_in" {% if consent == 'opted_in' %}selected{% endif %}>opted_in</option>
@@ -57,9 +58,23 @@
       {# (x or '') everywhere below: NULL columns render as the literal
          string "None" otherwise, which a Save would then persist. #}
       <label>Sender role <input name="sender_role" value="{{ (campaign.sender_role or '') if campaign else '' }}"></label>
-      <label>Sender email <span class="sub">The verified from-address — required to send
-        (cold → Mailjet, opted_in → Resend); its domain must be verified with that vendor</span>
-        <input name="sender_email" type="email" value="{{ (campaign.sender_email or '') if campaign else '' }}"></label>
+      {# Sending mailbox. Default (empty value) rotates the From across the
+         whole verified pool; picking one pins every send for this campaign
+         to that mailbox. Senders come from repo.list_senders (campaign_edit).
+         A plain select — no JS — so the choice survives with the form. #}
+      <label>Sending mailbox
+        <span class="sub">Rotate across every verified sender (default, best for
+        deliverability), or send this campaign only from one mailbox. A pinned mailbox still
+        stops at its daily cap.</span>
+        <select name="pinned_sender_id">
+          <option value="">Rotate across all verified senders (default)</option>
+          {% for s in senders or [] %}
+          <option value="{{ s.id }}"
+                  {% if campaign and campaign.get('pinned_sender_id') == s.id %}selected{% endif %}>
+            {{ s.sender_email }}{% if not s.active %} (paused){% endif %}
+          </option>
+          {% endfor %}
+        </select></label>
       <label>Tone <input name="tone" value="{{ (campaign.tone or '') if campaign else '' }}"></label>
     </div>
     <div class="col">
@@ -84,16 +99,18 @@
    open (hx-trigger="load") and re-runs on Refresh — each is one LLM call. #}
 <aside class="preview-panel">
   <div class="pp-head">
-    <h2>Sample email</h2>
+    <h2>Preview email</h2>
     <button type="button" class="small secondary"
             hx-post="/ui/campaigns/{{ campaign.id }}/preview"
             hx-include="#brief-form" hx-target="#preview-result"
             hx-disabled-elt="this">Preview</button>
   </div>
-  <p class="sub" style="margin:0 0 12px">What the AI writes from this brief — no save,
-  no send. Click Preview whenever you want to check the current brief.</p>
+  <p class="sub" style="margin:0 0 12px">The actual email a real contact in this campaign
+  would get from the current brief — nothing saved or sent. Falls back to a sample if no
+  contacts are in yet.</p>
   <div id="preview-result">
-    <p class="hint">Click <strong>Preview</strong> to draft a sample email from this brief.</p>
+    <p class="hint">Click <strong>Preview</strong> to draft an email for a real contact
+    from this brief.</p>
   </div>
 </aside>
 </div>

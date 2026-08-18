@@ -27,6 +27,21 @@
         <span class="sub">Drafts are written and signed as this person</span>
         <input name="sender_name" value="{{ form.sender_name or '' }}"></label>
       <label>Sender role <input name="sender_role" value="{{ form.sender_role or '' }}"></label>
+      {# Optional single-mailbox pin. Default (empty) rotates the From across
+         the whole verified pool; picking one sends this campaign only from
+         that mailbox. Editable later on the campaign page. #}
+      <label>Sending mailbox
+        <span class="sub">Rotate across every verified sender (default), or send this
+        campaign only from one mailbox. A pinned mailbox still stops at its daily cap.</span>
+        <select name="pinned_sender_id">
+          <option value="">Rotate across all verified senders (default)</option>
+          {% for s in senders or [] %}
+          <option value="{{ s.id }}"
+                  {% if form.pinned_sender_id == s.id %}selected{% endif %}>
+            {{ s.sender_email }}{% if not s.active %} (paused){% endif %}
+          </option>
+          {% endfor %}
+        </select></label>
       <label>Contacts (CSV, optional)
         <span class="sub">Needs an email column; name, company and title are picked up
         when present. You can also upload later from the campaign page.</span>

@@ -59,9 +59,8 @@ _CONFIG_DEFAULTS = {
     "SCRAPE_BATCH_SIZE": 50,
     "APIFY_MAX_ACTIVE_RUNS": 3,
     # drafting
-    "DRAFT_PROVIDER": "groq",
+    "DRAFT_PROVIDER": "n8n",
     "N8N_LLM_URL": "",
-    "GROQ_API_KEY": "",
     "ANTHROPIC_API_KEY": "",
     "DRAFT_MODEL": "",
     "DRAFT_EFFORT": "high",
@@ -74,15 +73,8 @@ _CONFIG_DEFAULTS = {
     # email
     "MAILJET_API_KEY": "",
     "MAILJET_SECRET_KEY": "",
-    "SMARTLEAD_API_KEY": "",
-    "RESEND_API_KEY": "",
+    "MAILJET_SENDER_DAILY_CAP": 25,
     "SEND_BATCH_SIZE": 25,
-    "SMARTLEAD_SCHEDULE_TIMEZONE": "America/New_York",
-    "SMARTLEAD_SCHEDULE_DAYS": (1, 2, 3, 4, 5),
-    "SMARTLEAD_SCHEDULE_START_HOUR": "09:00",
-    "SMARTLEAD_SCHEDULE_END_HOUR": "17:00",
-    "SMARTLEAD_MAX_NEW_LEADS_PER_DAY": 20,
-    "SMARTLEAD_MIN_TIME_BTW_EMAILS": 10,
     # scheduler — off, so no test can start a real background job
     "SCHEDULER_ENABLED": False,
     "SCHEDULER_INTERVAL_MINUTES": 5,

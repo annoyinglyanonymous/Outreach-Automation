@@ -46,19 +46,15 @@ def test_every_writer_guards_on_the_status_it_claimed(statement, guard):
     )
 
 
-def test_unsendable_report_survives_a_null_consent_status():
+def test_unsendable_report_uses_is_not_true_not_bare_negation():
     """Invariant: a campaign the claim skips must be explained somewhere.
-
-    ``NOT (... consent_status = ANY($1) ...)`` is NULL — not TRUE — when
-    consent_status is NULL, so the campaign vanished from this report
-    while also never being claimed: approved contacts stuck with nothing
-    on the dashboard to say why. Fixed 2026-08-12.
-    """
+    The report's inclusion is the NEGATION of the claim's sendable
+    predicate; use ``(...) IS NOT TRUE`` rather than ``NOT (...)`` so a
+    row is never dropped by three-valued logic (the original 2026-08-12
+    fix, kept as the pool predicate replaced the consent one)."""
     sql = repo.UNSENDABLE_APPROVED_SQL
     assert "IS NOT TRUE" in sql
     assert "AND NOT (g.status = 'active'" not in sql
-    # The CASE branch that names a NULL consent must stay reachable.
-    assert "coalesce(g.consent_status, 'NULL')" in sql
 
 
 def test_a_redraft_cannot_regress_a_contact_that_is_already_sending():
@@ -109,3 +105,105 @@ def test_no_stale_reset_ever_touches_a_sending_contact():
         assert "'sending'" not in getattr(repo, name), (
             f"{name} touches 'sending' rows; that re-sends already-sent mail."
         )
+
+
+# ---- mailjet sender pool (migration 010) -----------------------------
+
+
+def test_create_sender_sql_placeholders_match_the_field_list():
+    create = {int(n) for n in re.findall(r"\$(\d+)", repo.CREATE_SENDER_SQL)}
+    assert create == set(range(1, len(repo.MAILJET_SENDER_FIELDS) + 1))
+    # $1 is the id, then one placeholder per updatable field.
+    update = {int(n) for n in re.findall(r"\$(\d+)", repo.UPDATE_SENDER_SQL)}
+    assert update == set(range(1, len(repo.MAILJET_SENDER_FIELDS) + 2))
+
+
+def test_rotating_sender_pick_is_atomic_lru_and_resets_daily():
+    """The pick must not double-hand a domain under concurrency, must be
+    least-recently-used, and must reset the counter when the day rolls."""
+    sql = repo.CLAIM_ROTATING_SENDER_SQL
+    assert "FOR UPDATE SKIP LOCKED" in sql               # one row, one worker
+    assert "ORDER BY last_used_at NULLS FIRST" in sql    # LRU
+    assert "day < current_date" in sql                   # lazy daily reset
+    assert "sent_today + 1" in sql                        # counts a real send
+
+
+def test_rotating_sender_release_floors_and_is_day_scoped():
+    sql = repo.RELEASE_ROTATING_SENDER_SQL
+    assert "GREATEST(sent_today - 1, 0)" in sql   # never negative
+    assert "day = current_date" in sql            # don't touch a rolled-over counter
+
+
+def test_email_claim_gates_on_pool_capacity_not_consent():
+    """Mailjet is the only sender: sendability is pool capacity, and the
+    claim carries no consent/sender columns any more."""
+    sql = repo.CLAIM_EMAIL_SQL
+    assert "mailjet_senders" in sql
+    assert "m.sent_today < m.daily_cap" in sql
+    assert "consent_status" not in sql
+    assert "sender_email" not in sql
+
+
+def test_unsendable_report_names_an_empty_pool_not_a_capped_one():
+    """An empty pool is a permanent misconfig worth naming; a merely-capped
+    pool is transient pacing and must NOT show as unsendable — so the
+    predicate checks active-existence, not remaining capacity."""
+    sql = repo.UNSENDABLE_APPROVED_SQL
+    assert "no active senders in the rotation pool" in sql
+    assert "EXISTS (SELECT 1 FROM mailjet_senders m WHERE m.active)" in sql
+    assert "IS NOT TRUE" in sql
+
+
+# ---- single-mailbox pin (migration 011) ------------------------------
+
+
+def test_pinned_sender_pick_is_atomic_and_scoped_to_one_id():
+    """The pinned counterpart to the rotating pick: same concurrency-safe
+    count-and-stamp and lazy daily reset, but locked to ONE id (WHERE id = $1)
+    instead of picking LRU across the pool — so the per-domain cap still
+    bounds a pinned campaign."""
+    sql = repo.CLAIM_PINNED_SENDER_SQL
+    assert "WHERE id = $1" in sql
+    assert "FOR UPDATE SKIP LOCKED" in sql   # one row, one worker
+    assert "day < current_date" in sql       # lazy daily reset
+    assert "sent_today + 1" in sql           # counts a real send
+    # NOT an LRU pick across the pool — it is pinned to the one id.
+    assert "ORDER BY last_used_at" not in sql
+
+
+def test_email_claim_gate_is_per_campaign_pin_aware():
+    """The capacity gate is per-campaign: a rotating campaign
+    (pinned_sender_id IS NULL) needs any active sender with room, a pinned
+    one needs its specific sender. The pin is carried out of the claim so the
+    runner knows which sender to draw for each contact."""
+    sql = repo.CLAIM_EMAIL_SQL
+    assert "g.pinned_sender_id IS NULL" in sql
+    assert "m.id = g.pinned_sender_id" in sql
+    assert "claimed.pinned_sender_id" in sql   # returned to the runner
+
+
+def test_unsendable_report_surfaces_a_pin_to_a_paused_mailbox():
+    """A campaign pinned to a paused/deleted sender can never be claimed even
+    while the pool has other active senders, so it must be surfaced (not
+    silently dropped) — the report names it, and its inclusion predicate
+    mirrors the claim's per-campaign gate."""
+    sql = repo.UNSENDABLE_APPROVED_SQL
+    assert "pinned sender inactive" in sql
+    assert "m.id = g.pinned_sender_id" in sql
+
+
+def test_pool_sync_auto_enrols_new_and_pauses_unverified():
+    """Full auto-enrol: Mailjet's verified list drives pool membership.
+    A verified address absent from the pool is INSERTed (active, default
+    cap); an active row no longer verified is set inactive (paused, not
+    deleted, so counters/history survive). The membership test is the
+    unnested verified list, matched case-insensitively. Nothing here sets
+    active = true on an existing row — that would silently undo an
+    operator's manual pause of a still-verified sender."""
+    sql = repo.SYNC_SENDERS_SQL
+    assert "INSERT INTO mailjet_senders" in sql
+    assert "unnest($1::text[], $2::text[])" in sql
+    assert "NOT EXISTS" in sql          # only enrol addresses not already present
+    assert "SET active = false" in sql  # pause the no-longer-verified
+    assert "lower(" in sql              # case-insensitive membership
+    assert "SET active = true" not in sql

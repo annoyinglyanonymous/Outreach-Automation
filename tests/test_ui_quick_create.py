@@ -55,11 +55,19 @@ def state(monkeypatch):
         "campaign": dict(CAMPAIGN),
         "created": None,
         "ingested": None,
+        "active_senders": 0,   # rotation-pool size the edit page reads
     }
 
     async def expand_objective(objective, sender_name, sender_role, expander=None):
         s["objective_args"] = (objective, sender_name, sender_role)
         return s["brief"]
+
+    async def count_active_senders():
+        return s["active_senders"]
+
+    async def list_senders():
+        # The edit page offers the pool in the "Sending mailbox" dropdown.
+        return s.get("senders", [])
 
     async def create_campaign(fields):
         s["created"] = dict(fields)
@@ -83,6 +91,8 @@ def state(monkeypatch):
     monkeypatch.setattr(repo, "create_campaign", create_campaign)
     monkeypatch.setattr(repo, "get_campaign", get_campaign)
     monkeypatch.setattr(repo, "delete_campaign", delete_campaign)
+    monkeypatch.setattr(repo, "count_active_senders", count_active_senders)
+    monkeypatch.setattr(repo, "list_senders", list_senders)
 
     s["nudges"] = []
     monkeypatch.setattr(routes.runs, "nudge",
@@ -119,8 +129,12 @@ def test_happy_path(client, session_cookie, state):
     assert state["created"]["channel_policy"] == "email_only"
     assert state["created"]["sender_email"] is None
     assert state["created"]["smartlead_campaign_id"] is None
+    # pinned_sender_id starts NULL too — a new campaign rotates the pool
+    # (pinning is an edit-page choice), so it joins the delivery-column NULLs.
+    assert state["created"]["pinned_sender_id"] is None
     assert not any(v is None for k, v in state["created"].items()
-                   if k not in ("sender_email", "smartlead_campaign_id"))
+                   if k not in ("sender_email", "smartlead_campaign_id",
+                                "pinned_sender_id"))
     assert state["ingested"] == (1, 2)
     assert state["objective_args"] == ("Sell the platform", "Dana", "AE")
     assert state["nudges"] == ["enrich"]  # ingested contacts start enriching now
@@ -151,26 +165,58 @@ def test_no_csv_never_calls_ingest(client, session_cookie, state):
     assert "ingest" not in response.headers["location"]
 
 
+def test_new_page_offers_the_sending_mailbox_dropdown(client, session_cookie, state):
+    """Quick create shows the same optional pin as the edit page: rotate the
+    pool (default) or send only from one mailbox, paused senders flagged."""
+    state["senders"] = [{"id": 7, "sender_email": "one@d1.com", "active": True},
+                        {"id": 9, "sender_email": "two@d2.com", "active": False}]
+    body = client.get("/ui/campaigns/new", cookies=session_cookie).text
+    assert 'name="pinned_sender_id"' in body
+    assert "Rotate across all verified senders" in body
+    assert "one@d1.com" in body
+    assert "(paused)" in body                       # sender 9 flagged
+
+
+def test_create_pins_the_chosen_mailbox(client, session_cookie, state):
+    """A mailbox chosen at create time persists as the bigint FK (an int, not
+    the raw form string, so asyncpg accepts it)."""
+    response = create(client, session_cookie, pinned_sender_id="7")
+    assert response.status_code == 303
+    assert state["created"]["pinned_sender_id"] == 7      # int, not "7"
+
+
+def test_create_without_a_mailbox_rotates_the_pool(client, session_cookie, state):
+    """No pin chosen leaves pinned_sender_id NULL — a new campaign rotates."""
+    response = create(client, session_cookie)           # no pinned_sender_id
+    assert response.status_code == 303
+    assert state["created"]["pinned_sender_id"] is None
+
+
 # ---- preview email ----------------------------------------------------
 
 
 def test_preview_route_renders_sample_and_remaps_brief(client, session_cookie, monkeypatch):
     """The route feeds the drafter the aliased brief (offer_description ->
-    offer, sender_name -> sender) and renders the returned sample."""
+    offer, sender_name -> sender) and renders the returned email."""
     captured = {}
 
-    async def fake_preview(campaign, drafter=None):
+    async def no_contact(campaign_id):
+        return None                                  # no contacts ingested yet
+
+    async def fake_preview(campaign, drafter=None, contact=None):
         captured["campaign"] = campaign
         return {
             "from": {"name": "Rushel", "role": "AI Associate"},
+            "source": "sample",
             "sample": {"name": "Jordan Reyes", "title": "Owner",
                        "company": "Reyes Insurance Group", "email": "jordan@reyes.com"},
             "template": {"subject": "Quick question", "body": "Hi there"},
             "personalized": {"subject": "Explore new markets",
                              "body": "Hi Jordan, ...", "linkedin_note": "Nice to connect"},
-            "error": None,
+            "error": None, "note": None,
         }
 
+    monkeypatch.setattr(routes.repo, "get_preview_contact", no_contact)
     monkeypatch.setattr(routes.drafting, "preview_draft", fake_preview)
 
     response = client.post("/ui/campaigns/1/preview", cookies=session_cookie, data={
@@ -184,17 +230,55 @@ def test_preview_route_renders_sample_and_remaps_brief(client, session_cookie, m
     assert response.status_code == 200
     body = response.text
     assert "Explore new markets" in body            # personalized subject rendered
-    assert "nothing is saved or sent" in body       # the sample-only hint
+    assert "nothing is saved or sent" in body       # the no-save hint
     # edit-form field names arrive remapped to the drafter's aliased keys
     assert captured["campaign"]["offer"] == "Agency Height markets"
     assert captured["campaign"]["sender"] == "Rushel"
     assert captured["campaign"]["tone"] == "friendly"
 
 
+def test_preview_uses_a_real_campaign_contact(client, session_cookie, monkeypatch):
+    """The route fetches one real contact for the campaign and drafts against
+    it — the preview is a real email, labelled as such, not a sample."""
+    from app.repo import DraftTarget
+    contact = DraftTarget(id=5, email="real@corp.com", first_name="Real",
+                          last_name="Person", company="Corp", title="Owner",
+                          linkedin_url=None, profile_data={"headline": "x"},
+                          campaign={})
+    captured = {}
+
+    async def fake_get_preview_contact(campaign_id):
+        captured["campaign_id"] = campaign_id
+        return contact
+
+    async def fake_preview(campaign, drafter=None, contact=None):
+        captured["contact"] = contact
+        return {
+            "from": {"name": "Dana", "role": "AE"}, "source": "contact",
+            "sample": {"name": "Real Person", "title": "Owner",
+                       "company": "Corp", "email": "real@corp.com"},
+            "template": {"subject": "s", "body": "b"},
+            "personalized": {"subject": "Hi Real", "body": "body", "linkedin_note": None},
+            "error": None, "note": None,
+        }
+
+    monkeypatch.setattr(routes.repo, "get_preview_contact", fake_get_preview_contact)
+    monkeypatch.setattr(routes.drafting, "preview_draft", fake_preview)
+
+    response = client.post("/ui/campaigns/7/preview", cookies=session_cookie,
+                           data={"offer_description": "x", "sender_name": "Dana"})
+    assert response.status_code == 200
+    assert captured["campaign_id"] == 7               # fetched for THIS campaign
+    assert captured["contact"] is contact             # the real contact flowed through
+    body = response.text
+    assert "Previewing a real contact" in body        # labelled real, not a sample
+    assert "Real Person" in body
+
+
 def test_preview_route_rejects_cross_origin(client, session_cookie, monkeypatch):
     called = {"n": 0}
 
-    async def fake_preview(campaign, drafter=None):
+    async def fake_preview(campaign, drafter=None, contact=None):
         called["n"] += 1
         return {"sample": {}, "template": {}, "personalized": None, "error": None}
 
@@ -227,12 +311,22 @@ def test_delete_edit_page_shows_danger_zone(client, session_cookie, state):
     assert "/ui/campaigns/1/delete" in response.text
 
 
-def test_cold_campaign_without_sender_email_shows_not_ready(client, session_cookie, state):
-    """A cold campaign can't send until a verified Mailjet sender_email is
-    set — the edit page surfaces that rather than leaving it a mystery."""
+def test_cold_campaign_with_empty_pool_shows_not_ready(client, session_cookie, state):
+    """Cold sends rotate through the pool; an empty pool means no cold
+    campaign can send, and the edit page surfaces that (not a mystery)."""
+    state["active_senders"] = 0
     response = client.get("/ui/campaigns/1", cookies=session_cookie)
     assert response.status_code == 200
     assert "Not ready to send" in response.text
+
+
+def test_cold_campaign_with_active_pool_is_ready(client, session_cookie, state):
+    """With at least one active sender in the pool, the cold campaign is
+    sendable — no 'Not ready' banner."""
+    state["active_senders"] = 3
+    response = client.get("/ui/campaigns/1", cookies=session_cookie)
+    assert response.status_code == 200
+    assert "Not ready to send" not in response.text
 
 
 def test_edit_page_decodes_flashes(client, session_cookie, state):

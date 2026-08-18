@@ -222,14 +222,14 @@ def test_missing_config_maps_stages(monkeypatch):
     # missing_*_vars are classmethods, so the class attribute is what counts.
     monkeypatch.setattr(type(config), "APIFY_TOKEN", "")
     monkeypatch.setattr(type(config), "APIFY_ACTOR_ID", "x")
-    monkeypatch.setattr(type(config), "GROQ_API_KEY", "")
+    monkeypatch.setattr(type(config), "N8N_LLM_URL", "")
     monkeypatch.setattr(type(config), "ANTHROPIC_API_KEY", "")
     assert runs.missing_config("enrich") == []
     assert runs.missing_config("scrape") == ["APIFY_TOKEN"]
 
     # The draft check follows the configured provider.
-    monkeypatch.setattr(type(config), "DRAFT_PROVIDER", "groq")
-    assert runs.missing_config("draft") == ["GROQ_API_KEY"]
+    monkeypatch.setattr(type(config), "DRAFT_PROVIDER", "n8n")
+    assert runs.missing_config("draft") == ["N8N_LLM_URL"]
     monkeypatch.setattr(type(config), "DRAFT_PROVIDER", "anthropic")
     assert runs.missing_config("draft") == ["ANTHROPIC_API_KEY"]
 

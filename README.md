@@ -75,15 +75,20 @@ its own signed session cookie, so no JWT machinery exists here. Pages:
   stages take only `review_status = 'approved'` contacts, and a re-draft
   resets the review — an approval can never outlive the copy it approved.
 - **Campaigns** — quick create: name + objective + sender (+ optional
-  CSV). The objective is expanded by one Groq call into the full brief
+  CSV). The objective is expanded by one n8n LLM call into the full brief
   (offer, CTA, tone, fallback template — degrades to a generic template
-  if the LLM is unavailable), and for cold campaigns the Smartlead
-  campaign is built automatically: shell sequence, every connected
-  mailbox, a conservative schedule (`SMARTLEAD_SCHEDULE_*`), activated,
-  id written back. Vendor failures never block creation — outcomes
-  surface as flashes, and the edit page has a "Set up Smartlead" retry.
-  The edit page keeps every field; CSV upload proxies to the n8n ingest
-  webhook (`N8N_INGEST_URL`).
+  if the LLM is unavailable). Sending needs no per-campaign setup: the
+  From comes from the global sender pool (the **Senders** page), so a
+  campaign is sendable as soon as the pool has an active domain. The edit
+  page keeps every field, and its **Sending mailbox** dropdown optionally
+  pins a campaign to one mailbox — every send goes only from that sender
+  (still capped) instead of rotating the pool (migration 011). CSV upload
+  proxies to the n8n ingest webhook (`N8N_INGEST_URL`).
+- **Senders** — the global Mailjet From-rotation pool: add/edit/pause/delete
+  validated sending domains, each with a per-day cap. Cold sends rotate
+  least-recently-used across the active pool. The add form can pull the
+  account's Mailjet-verified addresses (`GET /v3/REST/sender`), degrading to
+  manual entry if Mailjet is unreachable.
 
 Requires migrations 003 + 004 and the `SUPABASE_URL` /
 `SUPABASE_ANON_KEY` / `SESSION_SECRET` env vars (see .env.example).
@@ -222,20 +227,17 @@ it, nothing else changes:
   put the production webhook URL in `N8N_LLM_URL`. Model changes are
   an n8n node edit, not a deploy. The same webhook also powers the
   quick-create brief expansion.
-- `groq` — OpenAI-compatible endpoint via httpx, JSON mode. Default
-  model `openai/gpt-oss-120b`; well under $1 per 900-contact campaign.
-  Free-tier warning: keep prompt+`DRAFT_MAX_TOKENS` inside the 8000
-  tokens-per-request budget, but not so low that reasoning eats the
-  output (both failure modes were hit live).
 - `anthropic` — official SDK with structured outputs. Default model
-  `claude-opus-4-8`; roughly $17 per 900-contact campaign.
+  `claude-opus-4-8`; roughly $17 per 900-contact campaign. Note it has no
+  `complete_json`, so it cannot power AI verification or brief expansion —
+  those degrade to their manual/fallback paths under `anthropic`.
 
 `DRAFT_MODEL` overrides the per-provider default. A refusal releases
 just that contact and the run continues; rate-limit/5xx exhaustion
 releases the unprocessed remainder and aborts, keeping drafts already
 paid for.
 
-## Email sending (Mailjet / Resend)
+## Email sending (Mailjet)
 
 Requires migration 005. The gate is `email_status = 'drafted' AND
 review_status = 'approved'`, and only this stage moves `email_status`
@@ -243,23 +245,35 @@ forward — which is what makes the business rule hold: **at most one
 first-touch email per contact, ever**. No review/redraft sequence can
 return a sent contact to the queue.
 
-Both paths now send transactionally from the campaign's verified
-`sender_email`; `consent_status` only picks which vendor:
+**Mailjet is the only sender.** Every approved draft is sent via the Send
+API v3.1 (`POST /v3.1/send`, HTTP Basic auth over
+`MAILJET_API_KEY`/`MAILJET_SECRET_KEY`), with the drafted subject/body
+posted directly as the message. `consent_status` is a record-only field
+now; it no longer picks a vendor.
 
-- **`cold` → Mailjet.** Send API v3.1 (`POST /v3.1/send`, HTTP Basic auth
-  over `MAILJET_API_KEY`/`MAILJET_SECRET_KEY`). The drafted subject/body are
-  posted directly as the message; the sender domain must be verified in
-  Mailjet (SPF/DKIM). ⚠️ Mailjet is a bulk ESP whose AUP forbids cold
-  outreach and whose shared infrastructure hurts cold deliverability — this
-  is a deliberate, owner-directed choice, not a recommended default.
-  Mailjet has **no idempotency key**, so an ambiguous failure *after* the
-  request left us raises `SendUncertain`: the contact is left at `'sending'`
-  (surfaced as stuck, human-resolved) rather than released, because a replay
-  could double-send. `SMARTLEAD_API_KEY` is retained only as a cutover
-  fallback (used for cold if the Mailjet pair is unset).
-- **`opted_in` → Resend.** Needs a verified sending domain and the
-  campaign's `sender_email`. Every send carries
-  `Idempotency-Key: outreach/contact-{id}` so retries cannot double-send.
+The **From is rotated** across a global sender pool (`mailjet_senders`,
+migration 010): each send draws the least-recently-used active domain with
+remaining daily capacity, so no single domain carries all the volume — the
+one deliverability lever available on an ESP. Manage the pool on the
+**Senders** page. ⚠️ Mailjet is a bulk ESP whose AUP forbids cold outreach
+and whose shared IPs hurt cold deliverability — a deliberate, owner-directed
+choice, not a recommended default.
+
+A campaign may instead be **pinned to one mailbox** (`campaigns.pinned_sender_id`,
+migration 011) — e.g. a named-person sequence where every touch must come
+from the same address. A pinned campaign draws that one sender only, via
+`claim_pinned_sender`; the pin narrows *which* sender is used but does not
+lift the per-domain daily cap, so it still sends at most `daily_cap`/day.
+The claim's capacity gate is per-campaign: a pinned mailbox at cap stops
+*that* campaign without pausing others, and a pin to a paused/deleted sender
+is surfaced as "approved but unsendable", never silently rotated back to the
+pool (only a hard-deleted sender reverts a campaign to rotation).
+
+Mailjet has **no idempotency key**, so an ambiguous failure *after* the
+request left us raises `SendUncertain`: the contact is left at `'sending'`
+(surfaced as stuck, human-resolved) rather than released, because a replay
+could double-send. A hard rejection returns the rotating sender's daily
+slot; an uncertain send keeps it (the mail may have counted).
 
 Safety semantics worth knowing:
 
@@ -267,10 +281,10 @@ Safety semantics worth knowing:
   the claim); suppressed contacts are terminal, approval notwithstanding.
 - Contacts stuck at `'sending'` (crash between vendor accept and our
   write, or a Mailjet `SendUncertain`) are **never auto-retried** — the
-  dashboard and `/stats` surface them; resolve against the provider
+  dashboard and `/stats` surface them; resolve against the Mailjet
   dashboard by hand.
 - `'failed'` (hard rejection) is terminal; re-sending is a human decision.
-- Misconfigured campaigns (missing `sender_email` / API key) are never
+- Campaigns approved while the sender pool has no active domain are never
   claimed and cannot starve other campaigns; the dashboard lists them as
   "approved but unsendable" with the reason.
 
@@ -320,11 +334,8 @@ credential in the "Apply to DB" node, **activate it** (an inactive workflow
 silently stops recording unsubscribes — a compliance risk, hence the
 heartbeat events), then add an Event API webhook in Mailjet (Account →
 Event tracking / triggers) pointed at the workflow URL, subscribed to
-sent, bounce, blocked, spam and unsub. The legacy Smartlead webhook
-(`docs/n8n-suppression-webhook.json`) stays importable for any campaign
-still sending through the Smartlead cutover fallback. Still deferred (so
-n8n's blast radius stays small): the Resend `List-Unsubscribe` header and a
-Resend-side webhook, i.e. the opted-in path's own outcome feedback.
+sent, bounce, blocked, spam and unsub. (`docs/n8n-suppression-webhook.json`
+is the retired Smartlead-era version, kept for reference only.)
 
 ## Tests
 
@@ -340,8 +351,9 @@ be formalised from the original throwaway scripts.
 
 - **Never deploy to, or depend on, the n8n VPS.** It runs other
   production automations.
-- Email sending (future stage) must branch on `consent_status`:
-  Resend/Postmark prohibit cold outreach; cold lists go through
-  cold-email infrastructure.
+- Email sends through **Mailjet only** (owner-directed). Bulk ESPs
+  (Mailjet/Resend/Postmark) prohibit cold outreach under their AUP; the
+  From is rotated across many validated domains to spread reputation, the
+  one lever available on an ESP. `consent_status` is a record-only field.
 - LinkedIn sending (future stage) drives real accounts via Unipile;
   `accounts.daily_limit` (default 15) is deliberately conservative.

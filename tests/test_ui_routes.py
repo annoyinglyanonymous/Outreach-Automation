@@ -2,6 +2,8 @@
 with repo and providers replaced by fakes (no database, no vendors)."""
 from __future__ import annotations
 
+import re
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -96,6 +98,11 @@ def calls(monkeypatch):
     async def list_campaigns():
         return []
 
+    async def list_senders():
+        # The campaign create/edit forms offer the pool as the "Sending
+        # mailbox" dropdown; empty is fine for tests that don't assert on it.
+        return []
+
     async def review_counts():
         return {"pending_review": 1}
 
@@ -111,8 +118,8 @@ def calls(monkeypatch):
     for fn in (update_draft, set_review_status, requeue_for_redraft,
                confirm_enrichment, reject_enrichment, contact_detail,
                enrichment_review_queue, review_queue, verification_outcomes,
-               recent_verifications, list_campaigns, review_counts,
-               status_counts, pending_runs, recent_events):
+               recent_verifications, list_campaigns, list_senders,
+               review_counts, status_counts, pending_runs, recent_events):
         monkeypatch.setattr(repo, fn.__name__, fn)
 
     # Record nudges instead of starting real background runs.
@@ -415,7 +422,15 @@ def test_unicode_digit_in_a_flash_param_does_not_500(client, session_cookie,
                     consent_status="cold", smartlead_campaign_id="sl-1",
                     sender_email=None)
 
+    async def count_active_senders():
+        return 0
+
+    async def list_senders():
+        return []
+
     monkeypatch.setattr(repo, "get_campaign", get_campaign)
+    monkeypatch.setattr(repo, "count_active_senders", count_active_senders)
+    monkeypatch.setattr(repo, "list_senders", list_senders)
 
     assert client.get("/ui/campaigns/1?ingested=3",
                       cookies=session_cookie).status_code == 200
@@ -478,6 +493,73 @@ def test_saving_a_campaign_cannot_revert_the_smartlead_id(client, session_cookie
     assert response.status_code == 303
     assert "smartlead_campaign_id" not in seen["fields"]
     assert seen["fields"]["tone"] == "warmer"
+
+
+def test_campaign_edit_offers_the_sending_mailbox_dropdown(client, session_cookie,
+                                                           monkeypatch):
+    """The edit form lets a campaign rotate across the pool (default) or pin
+    to one mailbox: the pool renders as a select, the campaign's current pin
+    is pre-selected, and a paused sender is flagged so it isn't picked blind."""
+    async def get_campaign(campaign_id):
+        fields = {f: "" for f in repo.CAMPAIGN_FIELDS}
+        return dict(fields, id=campaign_id, name="Pinned", status="active",
+                    pinned_sender_id=7)
+
+    async def count_active_senders():
+        return 2
+
+    async def list_senders():
+        return [{"id": 7, "sender_email": "one@d1.com", "active": True},
+                {"id": 9, "sender_email": "two@d2.com", "active": False}]
+
+    monkeypatch.setattr(repo, "get_campaign", get_campaign)
+    monkeypatch.setattr(repo, "count_active_senders", count_active_senders)
+    monkeypatch.setattr(repo, "list_senders", list_senders)
+
+    body = client.get("/ui/campaigns/1", cookies=session_cookie).text
+    assert 'name="pinned_sender_id"' in body
+    assert "Rotate across all verified senders" in body
+    assert re.search(r'value="7"\s+selected>', body)         # the current pin
+    assert not re.search(r'value="9"\s+selected>', body)     # the other isn't
+    assert "(paused)" in body                                # sender 9 flagged
+
+
+def test_saving_a_campaign_pins_the_chosen_mailbox(client, session_cookie,
+                                                   monkeypatch):
+    """Choosing a mailbox persists as the bigint FK pinned_sender_id — an int,
+    not the raw form string, so asyncpg binds it (a bare string would raise)."""
+    seen = {}
+
+    async def update_campaign(campaign_id, fields):
+        seen["fields"] = fields
+        return True
+
+    monkeypatch.setattr(repo, "update_campaign", update_campaign)
+
+    r = client.post("/ui/campaigns/5", cookies=session_cookie,
+                    data={"name": "Pinned", "pinned_sender_id": "7"})
+
+    assert r.status_code == 303
+    assert seen["fields"]["pinned_sender_id"] == 7    # int, not "7"
+
+
+def test_saving_a_campaign_with_no_mailbox_rotates_the_pool(client, session_cookie,
+                                                            monkeypatch):
+    """The empty 'Rotate across all verified senders' option clears the pin
+    to NULL; a non-numeric value is treated the same, never a bad FK bind."""
+    seen = {}
+
+    async def update_campaign(campaign_id, fields):
+        seen["fields"] = fields
+        return True
+
+    monkeypatch.setattr(repo, "update_campaign", update_campaign)
+
+    for value in ("", "not-an-id"):
+        r = client.post("/ui/campaigns/5", cookies=session_cookie,
+                        data={"name": "Rotate", "pinned_sender_id": value})
+        assert r.status_code == 303
+        assert seen["fields"]["pinned_sender_id"] is None
 
 
 def test_oversized_csv_is_refused_before_it_is_read(client, session_cookie,

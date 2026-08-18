@@ -35,7 +35,12 @@ from .base import ProviderError, SendRejected, SendUncertain
 log = logging.getLogger(__name__)
 
 SEND_URL = "https://api.mailjet.com/v3.1/send"
+SENDER_LIST_URL = "https://api.mailjet.com/v3/REST/sender"
 RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
+# A short, fixed timeout for the UI sender-list read: a dead or slow
+# Mailjet must not hang the campaign edit page for the full provider
+# timeout (60s). The page degrades to manual entry if this raises.
+SENDER_LIST_TIMEOUT = 10.0
 # Transport failures that prove the request never reached Mailjet, so a
 # retry (and, on give-up, a release) cannot double-send. Everything else
 # that httpx raises is treated as ambiguous -> SendUncertain.
@@ -50,6 +55,59 @@ class MailjetSender:
         self.api_key = api_key or config.MAILJET_API_KEY
         self.secret_key = secret_key or config.MAILJET_SECRET_KEY
         self._transport = transport  # tests inject httpx.MockTransport
+
+    async def list_verified_sender_records(self) -> list[dict]:
+        """The verified sender records — ``{"email", "name"}`` — on the
+        Mailjet account. Read-only and best-effort: callers (the sender
+        dropdown, the pool auto-enrol sync) degrade rather than abort if
+        this raises, so it must never break a page render or a send run.
+
+        Only 'Active' (verified) individual addresses are returned.
+        Wildcard domain senders ('*@domain.com', created when a whole
+        domain is validated) are dropped — they authorise the domain but
+        are not themselves a usable From address. Deduped by lower(email)
+        and sorted so the dropdown order and the sync are deterministic.
+        The display Name rides along so the pool can enrol a sender with
+        the From name Mailjet already knows. A non-200, an unreachable
+        Mailjet, or unset keys all raise ProviderError; there is no retry
+        loop because a stale render/sync is not worth blocking on.
+        """
+        if not (self.api_key and self.secret_key):
+            raise ProviderError("mailjet: API key/secret not configured")
+
+        auth = httpx.BasicAuth(self.api_key, self.secret_key)
+        async with httpx.AsyncClient(
+            timeout=SENDER_LIST_TIMEOUT, transport=self._transport
+        ) as client:
+            try:
+                response = await client.get(SENDER_LIST_URL, auth=auth)
+            except httpx.RequestError as exc:
+                raise ProviderError(f"mailjet: sender list unreachable ({exc!s})") from exc
+
+        if response.status_code != 200:
+            raise ProviderError(
+                f"mailjet: sender list {response.status_code} {response.text[:200]}"
+            )
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise ProviderError(f"mailjet: sender list non-JSON body ({exc})") from exc
+
+        records: dict[str, dict] = {}
+        for row in (data or {}).get("Data") or []:
+            if str(row.get("Status", "")).lower() != "active":
+                continue
+            email = str(row.get("Email", "")).strip()
+            if not email or email.startswith("*"):  # skip wildcard domain senders
+                continue
+            name = str(row.get("Name", "")).strip() or None
+            records[email.lower()] = {"email": email, "name": name}
+        return [records[key] for key in sorted(records)]
+
+    async def list_verified_senders(self) -> list[str]:
+        """The verified from-addresses only, for the sender dropdown's
+        datalist. A thin projection of list_verified_sender_records."""
+        return [r["email"] for r in await self.list_verified_sender_records()]
 
     async def send(self, target) -> str:
         if not target.sender_email:

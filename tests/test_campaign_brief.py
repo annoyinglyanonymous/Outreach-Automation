@@ -3,14 +3,12 @@ failure degrades to the fallback brief so campaign creation cannot be
 blocked by the LLM vendor."""
 from __future__ import annotations
 
-import json
-
 import httpx
 import pytest
 
 from app import campaign_brief, drafting
 from app.config import config
-from app.providers.groq import GroqDrafter
+from app.providers.n8n_llm import N8nDrafter
 
 GOOD = {
     "offer_description": "Carrier access platform for GA agencies",
@@ -22,16 +20,13 @@ GOOD = {
 }
 
 
-def expander_returning(payload: dict | str, status: int = 200) -> GroqDrafter:
-    content = payload if isinstance(payload, str) else json.dumps(payload)
-
+def expander_returning(payload: dict, status: int = 200) -> N8nDrafter:
+    # The n8n webhook answers with the model's JSON object verbatim.
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status, json={
-            "choices": [{"finish_reason": "stop",
-                         "message": {"content": content}}],
-        })
+        return httpx.Response(status, json=payload)
 
-    return GroqDrafter(api_key="k", transport=httpx.MockTransport(handler))
+    return N8nDrafter(url="https://n8n.example/webhook/llm",
+                      transport=httpx.MockTransport(handler))
 
 
 @pytest.mark.asyncio
@@ -46,9 +41,10 @@ async def test_happy_expansion():
 @pytest.mark.asyncio
 async def test_provider_error_falls_back():
     def handler(request):
-        return httpx.Response(401, text="bad key")
+        return httpx.Response(401, text="bad url")
 
-    expander = GroqDrafter(api_key="k", transport=httpx.MockTransport(handler))
+    expander = N8nDrafter(url="https://n8n.example/webhook/llm",
+                          transport=httpx.MockTransport(handler))
     fields, source = await campaign_brief.expand_objective(
         "Sell the platform", "Dana", None, expander=expander)
     assert source == "fallback"
@@ -64,16 +60,17 @@ async def test_incomplete_shape_falls_back():
 
 
 @pytest.mark.asyncio
-async def test_non_groq_provider_falls_back_without_http(monkeypatch):
+async def test_non_n8n_provider_falls_back_without_http(monkeypatch):
+    # anthropic has no complete_json, so brief expansion can't use it.
     monkeypatch.setattr(type(config), "DRAFT_PROVIDER", "anthropic")
     fields, source = await campaign_brief.expand_objective("Obj", None, None)
     assert source == "fallback"
 
 
 @pytest.mark.asyncio
-async def test_missing_key_falls_back_without_http(monkeypatch):
-    monkeypatch.setattr(type(config), "DRAFT_PROVIDER", "groq")
-    monkeypatch.setattr(type(config), "GROQ_API_KEY", "")
+async def test_missing_url_falls_back_without_http(monkeypatch):
+    monkeypatch.setattr(type(config), "DRAFT_PROVIDER", "n8n")
+    monkeypatch.setattr(type(config), "N8N_LLM_URL", "")
     fields, source = await campaign_brief.expand_objective("Obj", None, None)
     assert source == "fallback"
 

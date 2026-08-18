@@ -92,13 +92,11 @@ def build_verifier():
     """The LLM provider exposing `complete_json`, chosen exactly as
     `campaign_brief.expand_objective` does. None when none is configured —
     the stage then no-ops and the manual verify page remains the path.
-    (Anthropic has no `complete_json`, so it is not an option here.)"""
+    (Only the n8n webhook exposes `complete_json`; Anthropic does not, so it
+    is not an option here.)"""
     if config.DRAFT_PROVIDER == "n8n" and config.N8N_LLM_URL:
         from .providers.n8n_llm import N8nDrafter
         return N8nDrafter()
-    if config.DRAFT_PROVIDER == "groq" and config.GROQ_API_KEY:
-        from .providers.groq import GroqDrafter
-        return GroqDrafter()
     return None
 
 
