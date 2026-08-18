@@ -248,8 +248,13 @@ return a sent contact to the queue.
 **Mailjet is the only sender.** Every approved draft is sent via the Send
 API v3.1 (`POST /v3.1/send`, HTTP Basic auth over
 `MAILJET_API_KEY`/`MAILJET_SECRET_KEY`), with the drafted subject/body
-posted directly as the message. `consent_status` is a record-only field
-now; it no longer picks a vendor.
+posted as the message. The body is sent as **two parts**: the stored plain
+text as the text/plain alternative, and an HTML rendering of the same copy
+(`email_format.render_html_body`) as the text/html part, so it lands as a
+formatted email — paragraphs, line breaks, clickable links — instead of an
+unstyled blob. The stored copy stays plain text (one editable source of
+truth; the review UI is unchanged) and the HTML is derived at send time.
+`consent_status` is a record-only field now; it no longer picks a vendor.
 
 The **From is rotated** across a global sender pool (`mailjet_senders`,
 migration 010): each send draws the least-recently-used active domain with

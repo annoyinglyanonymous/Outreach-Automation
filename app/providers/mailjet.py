@@ -30,6 +30,7 @@ import logging
 import httpx
 
 from ..config import config
+from ..email_format import render_html_body
 from .base import ProviderError, SendRejected, SendUncertain
 
 log = logging.getLogger(__name__)
@@ -116,19 +117,23 @@ class MailjetSender:
         from_block: dict = {"Email": target.sender_email}
         if target.sender_name:
             from_block["Name"] = target.sender_name
-        payload = {
-            "Messages": [
-                {
-                    "From": from_block,
-                    "To": [{"Email": target.email}],
-                    "Subject": target.email_subject,
-                    "TextPart": target.email_body,
-                    # A correlation handle for the delivery webhook, NOT a
-                    # dedupe key — Mailjet has none (see module docstring).
-                    "CustomID": f"outreach-contact-{target.id}",
-                }
-            ]
+        message = {
+            "From": from_block,
+            "To": [{"Email": target.email}],
+            "Subject": target.email_subject,
+            # Send both parts: the stored plain text as the text/plain
+            # alternative (unchanged, for text-only clients), and a formatted
+            # HTML rendering of the same copy so it lands as a real email —
+            # paragraphs, line breaks, clickable links (see email_format).
+            "TextPart": target.email_body,
+            # A correlation handle for the delivery webhook, NOT a dedupe
+            # key — Mailjet has none (see module docstring).
+            "CustomID": f"outreach-contact-{target.id}",
         }
+        html_body = render_html_body(target.email_body)
+        if html_body:
+            message["HTMLPart"] = html_body
+        payload = {"Messages": [message]}
         auth = httpx.BasicAuth(self.api_key, self.secret_key)
 
         last_error = "unknown"

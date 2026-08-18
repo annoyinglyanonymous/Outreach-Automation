@@ -75,8 +75,43 @@ async def test_send_uses_basic_auth_and_v31_body():
     assert msg["From"] == {"Email": "rojan@renegadeinsurance.com", "Name": "Rojan"}
     assert msg["To"] == [{"Email": "jane@doe.example"}]
     assert msg["Subject"] == "Quick question"
-    assert msg["TextPart"] == "Body text"
+    assert msg["TextPart"] == "Body text"            # plain text unchanged
     assert msg["CustomID"] == "outreach-contact-7"  # correlation handle for the webhook
+
+
+@pytest.mark.asyncio
+async def test_send_includes_a_formatted_html_part_alongside_the_text():
+    """The stored body is plain text; the send adds an HTML alternative so it
+    lands as a real formatted email. Both parts carry the same copy."""
+    seen = {}
+
+    def handler(request):
+        seen["msg"] = json.loads(request.content)["Messages"][0]
+        return httpx.Response(200, json=OK_BODY)
+
+    body = "Hi Jane,\n\nSaw you run commercial lines. Worth a quick call?\n\nRojan"
+    await sender_with(handler).send(dataclasses.replace(TARGET, email_body=body))
+
+    msg = seen["msg"]
+    assert msg["TextPart"] == body                   # plain text still sent verbatim
+    html = msg["HTMLPart"]
+    assert html.startswith("<div style=")            # inline-styled, real HTML
+    assert html.count("<p ") == 3                     # greeting / body / sign-off
+    assert "Saw you run commercial lines. Worth a quick call?" in html
+
+
+@pytest.mark.asyncio
+async def test_send_omits_html_part_for_an_empty_body():
+    """An empty body means no HTML alternative to add — TextPart only, never
+    an empty HTMLPart."""
+    seen = {}
+
+    def handler(request):
+        seen["msg"] = json.loads(request.content)["Messages"][0]
+        return httpx.Response(200, json=OK_BODY)
+
+    await sender_with(handler).send(dataclasses.replace(TARGET, email_body=""))
+    assert "HTMLPart" not in seen["msg"]
 
 
 @pytest.mark.asyncio
