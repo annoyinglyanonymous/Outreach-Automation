@@ -10,8 +10,11 @@ the business rule is at most ONE first-touch email per contact, ever:
   resetting them to 'drafted' would re-send. They are counted, surfaced
   in stats and the dashboard, and resolved by a human.
 - Releasing an in-flight contact on vendor failure is safe only because
-  both providers are idempotent per contact (Resend: Idempotency-Key;
-  Smartlead: duplicate leads in a campaign are skipped).
+  the provider is idempotent per contact (Resend: Idempotency-Key;
+  Smartlead: duplicate leads in a campaign are skipped). Mailjet has NO
+  idempotency key, so its provider raises SendUncertain for ambiguous
+  post-send failures — the contact is left at 'sending' (surfaced, never
+  released) rather than risk a re-send.
 """
 from __future__ import annotations
 
@@ -21,7 +24,7 @@ from dataclasses import dataclass, field
 
 from . import repo
 from .config import config
-from .providers.base import EmailSender, ProviderError, SendRejected
+from .providers.base import EmailSender, ProviderError, SendRejected, SendUncertain
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +37,7 @@ class EmailStats:
     rejected: int = 0
     suppressed: int = 0
     released: int = 0
+    uncertain: int = 0
     stuck_sending: int = 0
     seconds: float = 0.0
     errors: list[str] = field(default_factory=list)
@@ -46,6 +50,7 @@ class EmailStats:
             "rejected": self.rejected,
             "suppressed": self.suppressed,
             "released": self.released,
+            "uncertain": self.uncertain,
             "stuck_sending": self.stuck_sending,
             "seconds": round(self.seconds, 1),
             "errors": self.errors,
@@ -57,7 +62,12 @@ def build_senders() -> dict[str, EmailSender]:
     The claim query only picks contacts whose consent has a sender here,
     so a missing key narrows the queue instead of failing the run."""
     senders: dict[str, EmailSender] = {}
-    if config.SMARTLEAD_API_KEY:
+    # Cold now sends via Mailjet; Smartlead is kept only as a fallback
+    # during cutover (if the Mailjet pair isn't configured yet).
+    if config.MAILJET_API_KEY and config.MAILJET_SECRET_KEY:
+        from .providers.mailjet import MailjetSender
+        senders["cold"] = MailjetSender()
+    elif config.SMARTLEAD_API_KEY:
         from .providers.smartlead import SmartleadSender
         senders["cold"] = SmartleadSender()
     if config.RESEND_API_KEY:
@@ -89,6 +99,20 @@ async def _send_batch(
             stats.rejected += 1
             log.warning("send rejected for contact %d: %s", target.id, exc)
             continue
+        except SendUncertain as exc:
+            # The send may have landed and the provider has no idempotency
+            # key, so this contact must NOT be released (a replay could
+            # double-send). Leave it at 'sending' to be surfaced as stuck
+            # and resolved by a human. The untried remainder never left, so
+            # release it as normal, and stop the run.
+            log.error("send outcome uncertain for contact %d, left at 'sending': %s",
+                      target.id, exc)
+            stats.errors.append(str(exc))
+            stats.uncertain += 1
+            rest = [t.id for t in targets[index + 1:]]
+            if rest:
+                stats.released += await repo.release_email_claims(rest)
+            return False
         except ProviderError as exc:
             # Vendor down. Nothing has been marked for the current
             # contact; releasing it is safe because a replayed send

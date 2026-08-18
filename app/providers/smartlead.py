@@ -1,20 +1,25 @@
-"""Cold-email delivery via Smartlead. Only this module speaks to it.
+"""Cold-email delivery via Smartlead — retained as a CUTOVER FALLBACK only.
 
-A "send" here is pushing one lead into the campaign's Smartlead
-campaign, whose sequence is a bare shell of the merge variables
+Cold now sends via Mailjet (transactional); this module is used only when
+the Mailjet pair is unset and SMARTLEAD_API_KEY is, and only for legacy
+campaigns that still carry a smartlead_campaign_id. The campaign-setup
+machinery (create/sequence/mailboxes/schedule/activate) was removed with
+the UI that drove it; what remains is the lead-push send path.
+
+A "send" here is pushing one lead into the campaign's Smartlead campaign,
+whose sequence is a bare shell of the merge variables
 {{personalized_subject}} / {{personalized_body}} — so Smartlead's warmed
 mailboxes deliver OUR pre-personalised copy on its own schedule.
 
-Idempotency: Smartlead skips a lead already present in the same
-campaign and reports it in the skipped counts (verified against its API
-docs, 2026-08). A re-push after an ambiguous failure therefore cannot
-enqueue the sequence twice — the skip is treated as success.
+Idempotency: Smartlead skips a lead already present in the same campaign
+and reports it in the skipped counts (verified against its API docs,
+2026-08). A re-push after an ambiguous failure therefore cannot enqueue
+the sequence twice — the skip is treated as success.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
 
 import httpx
 
@@ -25,35 +30,6 @@ log = logging.getLogger(__name__)
 
 API_BASE = "https://server.smartlead.ai/api/v1"
 RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
-
-# Activation, as documented (POST /campaigns/{id}/status, enum
-# PAUSED/STOPPED/START). Constants so a doc drift is a one-line fix.
-ACTIVATE_METHOD = "POST"
-ACTIVATE_PAYLOAD = {"status": "START"}
-
-# The shell sequence campaign creation installs: our drafts arrive as
-# per-lead custom fields, so the sequence is nothing but the merge
-# variables. pre-wrap keeps the plain-text body's newlines when
-# Smartlead renders the custom field into HTML.
-SHELL_SEQUENCE = {
-    "sequences": [{
-        "id": None,
-        "seq_number": 1,
-        "subject": "{{personalized_subject}}",
-        "email_body": '<p style="white-space: pre-wrap">{{personalized_body}}</p>',
-        "seq_delay_details": {"delay_in_days": 0},
-    }],
-}
-
-
-@dataclass
-class CampaignSetup:
-    """Outcome of the auto-setup chain. failed_step is None on full
-    success; otherwise the id exists but that step needs finishing in
-    the Smartlead UI."""
-    campaign_id: str
-    failed_step: str | None = None
-    error: str | None = None
 
 # Smartlead response field names have drifted across API versions; read
 # every known spelling so a rename cannot silently misclassify a send.
@@ -70,16 +46,6 @@ def _count(data: dict, keys: tuple[str, ...]) -> int:
         except (TypeError, ValueError):
             continue
     return total
-
-
-def _account_email(account: dict) -> str:
-    """The mailbox address from an /email-accounts/ entry, tolerating the
-    field-name drift across Smartlead API versions (from_email is current)."""
-    for key in ("from_email", "email", "username"):
-        value = account.get(key)
-        if value:
-            return str(value)
-    return ""
 
 
 class SmartleadSender:
@@ -110,12 +76,8 @@ class SmartleadSender:
                 "ignore_duplicate_leads_in_other_campaign": False,
             },
         }
-        log.info(
-    "smartlead send: contact_id=%s email=%s campaign_id=%s",
-    target.id,
-    target.email,
-    target.smartlead_campaign_id,
-)
+        log.info("smartlead send: contact_id=%s email=%s campaign_id=%s",
+                 target.id, target.email, target.smartlead_campaign_id)
 
         data = await self._post(
             f"{API_BASE}/campaigns/{target.smartlead_campaign_id}/leads", payload
@@ -132,108 +94,6 @@ class SmartleadSender:
         if _count(data, INVALID_KEYS) >= 1:
             raise SendRejected("smartlead rejected the email address as invalid")
         raise ProviderError(f"smartlead: unrecognised response: {str(data)[:200]}")
-
-    # -- campaign auto-setup -------------------------------------------------
-
-    async def setup_campaign(self, name: str,
-                             mailboxes: list[str] | None = None) -> CampaignSetup:
-        """Create and fully configure a Smartlead campaign: shell
-        sequence, mailboxes, default schedule, activate.
-
-        `mailboxes` is an optional list of send-from addresses. When given,
-        only the connected inboxes whose address is in it are attached;
-        empty/None attaches every connected mailbox (the prior behaviour).
-
-        Stops at the first failure: activating a half-configured campaign
-        is worse than leaving it visible-but-drafted. Steps after create
-        report the failed step instead of raising — the id is the money
-        field and the caller persists it regardless. Two attempts per
-        call, not the send path's four: six sequential calls sit inside a
-        browser request.
-        """
-        data = await self._request(
-            "POST", f"{API_BASE}/campaigns/create", {"name": name}, max_attempts=2
-        )
-        campaign_id = str(data.get("id") or "")
-        if not campaign_id:
-            raise ProviderError(f"smartlead: create returned no id: {str(data)[:200]}")
-
-        async def step(label: str, coro) -> str | None:
-            try:
-                await coro
-                return None
-            except ProviderError as exc:
-                log.error("smartlead setup: %s failed for campaign %s: %s",
-                          label, campaign_id, exc)
-                return str(exc)
-
-        error = await step("sequence", self._request(
-            "POST", f"{API_BASE}/campaigns/{campaign_id}/sequences",
-            SHELL_SEQUENCE, max_attempts=2))
-        if error:
-            return CampaignSetup(campaign_id, "sequence", error)
-
-        try:
-            accounts = await self._request(
-                "GET", f"{API_BASE}/email-accounts/", None, max_attempts=2)
-        except ProviderError as exc:
-            return CampaignSetup(campaign_id, "email-accounts", str(exc))
-        connected = [a for a in accounts or [] if isinstance(a, dict) and a.get("id")]
-        if not connected:
-            return CampaignSetup(campaign_id, "email-accounts",
-                                 "no connected email accounts on the Smartlead account")
-
-        if mailboxes:
-            # Selection given: attach only the connected inboxes whose
-            # address is in it (case-insensitive on from_email). A selection
-            # that matches nothing live is a misconfiguration, not a licence
-            # to silently blast from every inbox.
-            wanted = {m.strip().lower() for m in mailboxes if m and m.strip()}
-            connected = [a for a in connected
-                         if _account_email(a).lower() in wanted]
-            if not connected:
-                return CampaignSetup(campaign_id, "email-accounts",
-                                     "selected mailboxes are not connected to Smartlead")
-
-        account_ids = [a["id"] for a in connected]
-
-        error = await step("email-accounts", self._request(
-            "POST", f"{API_BASE}/campaigns/{campaign_id}/email-accounts",
-            {"email_account_ids": account_ids}, max_attempts=2))
-        if error:
-            return CampaignSetup(campaign_id, "email-accounts", error)
-
-        error = await step("schedule", self._request(
-            "POST", f"{API_BASE}/campaigns/{campaign_id}/schedule", {
-                "timezone": config.SMARTLEAD_SCHEDULE_TIMEZONE,
-                "days_of_the_week": list(config.SMARTLEAD_SCHEDULE_DAYS),
-                "start_hour": config.SMARTLEAD_SCHEDULE_START_HOUR,
-                "end_hour": config.SMARTLEAD_SCHEDULE_END_HOUR,
-                "min_time_btw_emails": config.SMARTLEAD_MIN_TIME_BTW_EMAILS,
-                "max_new_leads_per_day": config.SMARTLEAD_MAX_NEW_LEADS_PER_DAY,
-            }, max_attempts=2))
-        if error:
-            return CampaignSetup(campaign_id, "schedule", error)
-
-        error = await step("activate", self._request(
-            ACTIVATE_METHOD, f"{API_BASE}/campaigns/{campaign_id}/status",
-            ACTIVATE_PAYLOAD, max_attempts=2))
-        if error:
-            return CampaignSetup(campaign_id, "activate", error)
-
-        return CampaignSetup(campaign_id)
-
-    async def list_email_accounts(self) -> list[dict]:
-        """Connected mailboxes as [{'id', 'email'}] for the campaign
-        picker. Normalises the address field so the UI and the stored
-        selection speak one spelling (see _account_email)."""
-        accounts = await self._request(
-            "GET", f"{API_BASE}/email-accounts/", None, max_attempts=2)
-        return [
-            {"id": a["id"], "email": _account_email(a)}
-            for a in accounts or []
-            if isinstance(a, dict) and a.get("id")
-        ]
 
     # -- transport ---------------------------------------------------------
 
@@ -256,10 +116,7 @@ class SmartleadSender:
                     )
                 except httpx.RequestError as exc:
                     # Ambiguous: the request may have landed. Lead pushes
-                    # are safe to retry because Smartlead dedupes them;
-                    # setup calls are idempotent-enough (re-saving a
-                    # sequence or schedule overwrites) except create,
-                    # whose duplicate would be an inert empty campaign.
+                    # are safe to retry because Smartlead dedupes them.
                     last_error = f"transport: {exc!s}"
                 else:
                     if response.status_code == 200:
@@ -290,15 +147,3 @@ class SmartleadSender:
         raise ProviderError(
             f"smartlead: gave up after {attempts} attempts ({last_error})"
         )
-
-
-async def setup_campaign(name: str,
-                         mailboxes: list[str] | None = None) -> CampaignSetup:
-    """Routes import this module-level wrapper (like n8n.ingest) so tests
-    monkeypatch one obvious seam."""
-    return await SmartleadSender().setup_campaign(name, mailboxes)
-
-
-async def list_email_accounts() -> list[dict]:
-    """Module-level seam for the mailbox picker (mirrors setup_campaign)."""
-    return await SmartleadSender().list_email_accounts()

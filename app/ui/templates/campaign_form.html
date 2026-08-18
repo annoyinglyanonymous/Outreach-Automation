@@ -15,16 +15,13 @@
 <p class="flash {{ f.level }}">{{ f.text }}</p>
 {% endfor %}
 
-{% if editing and not campaign.smartlead_campaign_id and campaign.consent_status == 'cold' %}
+{% if editing and campaign.consent_status == 'cold' and not campaign.sender_email %}
 <section class="card" style="margin-bottom:24px">
-  <div class="card-head"><h2>Smartlead not set up</h2></div>
-  <p class="hint">This cold campaign has no Smartlead campaign yet, so approved drafts
-  cannot send. One click creates and configures it — shell sequence, connected
-  mailboxes, schedule — and activates it.</p>
-  <form method="post" action="/ui/campaigns/{{ campaign.id }}/smartlead-setup"
-        style="margin-top:12px">
-    <button type="submit">Set up Smartlead</button>
-  </form>
+  <div class="card-head"><h2>Not ready to send</h2></div>
+  <p class="hint">This cold campaign sends via Mailjet but has no sender email yet, so
+  approved drafts can't go out. Set <strong>Sender email</strong> below to a
+  Mailjet-verified from-address (its domain must have SPF/DKIM verified in Mailjet).
+  Until then the campaign is listed as “approved but unsendable”, never silently dropped.</p>
 </section>
 {% endif %}
 
@@ -38,7 +35,7 @@
          Smartlead, opted_in → Resend) and a typo would silently make the
          campaign unsendable. #}
       {% set consent = (campaign.consent_status if campaign else 'cold') or 'cold' %}
-      <label>Consent status <span class="sub">Decides the send vendor: cold → Smartlead, opted_in → Resend</span>
+      <label>Consent status <span class="sub">Decides the send vendor: cold → Mailjet, opted_in → Resend</span>
         <select name="consent_status">
           <option value="cold" {% if consent == 'cold' %}selected{% endif %}>cold</option>
           <option value="opted_in" {% if consent == 'opted_in' %}selected{% endif %}>opted_in</option>
@@ -60,18 +57,9 @@
       {# (x or '') everywhere below: NULL columns render as the literal
          string "None" otherwise, which a Save would then persist. #}
       <label>Sender role <input name="sender_role" value="{{ (campaign.sender_role or '') if campaign else '' }}"></label>
-      <label>Sender email <span class="sub">Required for opted_in sends via Resend</span>
+      <label>Sender email <span class="sub">The verified from-address — required to send
+        (cold → Mailjet, opted_in → Resend); its domain must be verified with that vendor</span>
         <input name="sender_email" type="email" value="{{ (campaign.sender_email or '') if campaign else '' }}"></label>
-      {# Read-only, and deliberately carries no name= so a Save cannot post
-         it. The Smartlead auto-setup writes this column too, so a form
-         rendered before setup ran used to write its stale empty value back
-         over the new id and silently make the campaign unsendable.
-         repo.CAMPAIGN_UPDATE_FIELDS excludes it for the same reason. #}
-      <label>Smartlead campaign ID
-        <span class="sub">Set by “Set up Smartlead”; required for cold sends. Its
-        sequence must be the {% raw %}{{personalized_subject}} / {{personalized_body}}{% endraw %} shell</span>
-        <input value="{{ (campaign.smartlead_campaign_id or '') if campaign else '' }}"
-               placeholder="not set" disabled></label>
       <label>Tone <input name="tone" value="{{ (campaign.tone or '') if campaign else '' }}"></label>
     </div>
     <div class="col">
@@ -124,27 +112,12 @@
 </section>
 
 <section class="card" style="margin-top:24px">
-  <div class="card-head"><h2>Send-from mailboxes</h2></div>
-  <p class="hint">Which connected Smartlead inboxes this campaign sends from. None ticked = all
-  of them. Applies on the next “Set up Smartlead”; an already-set-up campaign keeps its current
-  inboxes until you rebuild it (clear the Smartlead ID above and re-run setup).</p>
-  <form hx-post="/ui/campaigns/{{ campaign.id }}/mailboxes" hx-target="#mailboxes-result">
-    <div id="mailbox-picker"
-         hx-get="/ui/fragments/mailboxes?campaign_id={{ campaign.id }}" hx-trigger="load">
-      <p class="hint">Loading connected mailboxes…</p>
-    </div>
-    <button type="submit" class="secondary" style="margin-top:12px">Save mailboxes</button>
-  </form>
-  <div id="mailboxes-result"></div>
-</section>
-
-<section class="card" style="margin-top:24px">
   <div class="card-head"><h2>Danger zone</h2></div>
   <p class="hint">
-    Deletes this campaign and its contacts and drafts from Outreach. This
-    does <strong>not</strong> delete the Smartlead campaign
-    {% if campaign.smartlead_campaign_id %}({{ campaign.smartlead_campaign_id }}){% endif %}
-    — remove that in Smartlead separately if you want it gone. Cannot be undone.
+    Deletes this campaign and its contacts and drafts from Outreach.
+    Suppression (global, email-keyed) is left intact, and nothing is
+    removed at the sending vendor — emails already dispatched can't be
+    recalled. Cannot be undone.
   </p>
   <form method="post" action="/ui/campaigns/{{ campaign.id }}/delete"
         onsubmit="return confirm('Delete this campaign and all its contacts and drafts? This cannot be undone.')">

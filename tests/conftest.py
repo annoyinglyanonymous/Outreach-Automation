@@ -72,6 +72,8 @@ _CONFIG_DEFAULTS = {
     "VERIFY_ENABLED": True,
     "VERIFY_BATCH_SIZE": 25,
     # email
+    "MAILJET_API_KEY": "",
+    "MAILJET_SECRET_KEY": "",
     "SMARTLEAD_API_KEY": "",
     "RESEND_API_KEY": "",
     "SEND_BATCH_SIZE": 25,

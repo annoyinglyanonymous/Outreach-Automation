@@ -235,7 +235,7 @@ just that contact and the run continues; rate-limit/5xx exhaustion
 releases the unprocessed remainder and aborts, keeping drafts already
 paid for.
 
-## Email sending (Smartlead / Resend)
+## Email sending (Mailjet / Resend)
 
 Requires migration 005. The gate is `email_status = 'drafted' AND
 review_status = 'approved'`, and only this stage moves `email_status`
@@ -243,15 +243,20 @@ forward — which is what makes the business rule hold: **at most one
 first-touch email per contact, ever**. No review/redraft sequence can
 return a sent contact to the queue.
 
-Per campaign, `consent_status` picks the vendor (the AUP constraint):
+Both paths now send transactionally from the campaign's verified
+`sender_email`; `consent_status` only picks which vendor:
 
-- **`cold` → Smartlead.** Create a Smartlead campaign whose sequence is
-  exactly the merge shell `{{personalized_subject}}` /
-  `{{personalized_body}}`, attach warmed mailboxes, and put its id in
-  the campaign form. Each approved contact is pushed as a lead carrying
-  the drafted copy; Smartlead schedules delivery, applies its block and
-  unsubscribe lists, and skips leads already in the campaign (which is
-  what makes crash-recovery replays safe).
+- **`cold` → Mailjet.** Send API v3.1 (`POST /v3.1/send`, HTTP Basic auth
+  over `MAILJET_API_KEY`/`MAILJET_SECRET_KEY`). The drafted subject/body are
+  posted directly as the message; the sender domain must be verified in
+  Mailjet (SPF/DKIM). ⚠️ Mailjet is a bulk ESP whose AUP forbids cold
+  outreach and whose shared infrastructure hurts cold deliverability — this
+  is a deliberate, owner-directed choice, not a recommended default.
+  Mailjet has **no idempotency key**, so an ambiguous failure *after* the
+  request left us raises `SendUncertain`: the contact is left at `'sending'`
+  (surfaced as stuck, human-resolved) rather than released, because a replay
+  could double-send. `SMARTLEAD_API_KEY` is retained only as a cutover
+  fallback (used for cold if the Mailjet pair is unset).
 - **`opted_in` → Resend.** Needs a verified sending domain and the
   campaign's `sender_email`. Every send carries
   `Idempotency-Key: outreach/contact-{id}` so retries cannot double-send.
@@ -261,12 +266,13 @@ Safety semantics worth knowing:
 - Suppression is swept immediately before every run (and re-checked in
   the claim); suppressed contacts are terminal, approval notwithstanding.
 - Contacts stuck at `'sending'` (crash between vendor accept and our
-  write) are **never auto-retried** — the dashboard and `/stats` surface
-  them; resolve against the provider dashboard by hand.
+  write, or a Mailjet `SendUncertain`) are **never auto-retried** — the
+  dashboard and `/stats` surface them; resolve against the provider
+  dashboard by hand.
 - `'failed'` (hard rejection) is terminal; re-sending is a human decision.
-- Misconfigured campaigns (missing Smartlead id / sender email / API key)
-  are never claimed and cannot starve other campaigns; the dashboard
-  lists them as "approved but unsendable" with the reason.
+- Misconfigured campaigns (missing `sender_email` / API key) are never
+  claimed and cannot starve other campaigns; the dashboard lists them as
+  "approved but unsendable" with the reason.
 
 ### Suppression, unsubscribes & delivery outcomes
 
@@ -276,42 +282,49 @@ whose email is listed flip to `suppressed`, terminal) and the send claim
 re-checks it, so a suppressed address is never mailed by any campaign or
 either vendor. The app only ever *reads* this table.
 
-Live outcomes from Smartlead sends are fed back by an n8n webhook
-(`docs/n8n-suppression-webhook.json`), not app code — the app is not
-publicly reachable, n8n already is and already writes to the same Supabase.
-Smartlead POSTs every event to the workflow, which classifies it and applies
-at most two effects, each guarded independently:
+Live outcomes from Mailjet sends are fed back by an n8n webhook
+(`docs/n8n-mailjet-events.json`), not app code — the app is not publicly
+reachable, n8n already is and already writes to the same Supabase. Mailjet's
+Event API POSTs each event to the workflow (batched as an array when event
+grouping is on — the classifier handles both), which applies at most two
+effects, each guarded independently:
 
-- `LEAD_UNSUBSCRIBED` → add to `suppression`.
-- hard `EMAIL_BOUNCE` → add to `suppression` **and** set the contact
-  `email_status = 'bounced'` (soft bounces are transient and ignored).
-- `EMAIL_REPLY` → set `email_status = 'replied'` (a reply is not a
-  do-not-contact, so no suppression).
-- `EMAIL_SENT` / `FIRST_EMAIL_SENT` → resolve a contact stuck at `sending`
-  (the crash window between vendor-accept and our write) to `sent_email`.
+- `unsub` / `spam` / `blocked` → add to `suppression` (do-not-contact).
+- hard `bounce` (`hard_bounce: true`) → add to `suppression` **and** set the
+  contact `email_status = 'bounced'` (soft bounces are transient, ignored).
+- `sent` → resolve a contact stuck at `sending` (the crash window between
+  vendor-accept and our write) to `sent_email`.
+
+**Reply detection is gone with Smartlead:** Mailjet is send-only and never
+emits a reply event, so there is no `email_status = 'replied'` path and the
+reply-rate KPI has no source here — restoring it needs Mailjet Inbound Parse
+or a separate reply-inbox integration.
 
 The status write **only ever advances** a contact (`sending → sent_email /
-replied / bounced`, `sent_email → replied / bounced`) — never back to a
-re-sendable state — so the at-most-one-send invariant holds, and stuck
-`sending` is resolved by Smartlead's own confirmation rather than a guessed
-retry. Contacts are matched by `lower(email)` **and** the campaign's
-`smartlead_campaign_id`, so an event for a campaign this app doesn't own
-(matched by neither) is a harmless no-op. The suppression insert is
-idempotent (`WHERE NOT EXISTS` on `lower(email)`); an event is logged
-(`suppression_added` / `reply_received` / `bounce_suppressed` /
+bounced`, `sent_email → bounced`) — never back to a re-sendable state — so
+the at-most-one-send invariant holds, and stuck `sending` is resolved by
+Mailjet's own confirmation rather than a guessed retry. Contacts are matched
+by the **`CustomID`** we stamp on every send (`outreach-contact-<id>`); the
+cast is `NULLIF($4,'')::bigint` so an event without a CustomID (one for a
+message this app didn't send) resolves to a harmless no-op instead of a
+plan-time cast error. Suppression is keyed on `lower(email)` and its insert
+is idempotent (`WHERE NOT EXISTS`); an event is logged (`suppression_added` /
+`spam_suppressed` / `blocked_suppressed` / `bounce_suppressed` /
 `send_confirmed`) only when something actually changed, doubling as a
 dashboard heartbeat — none end in `_failed`, so the error-rate KPI is
-untouched. **Requires migration 007**, which adds `replied` / `bounced` to
-the `email_status` CHECK; apply it *before* activating the workflow or those
-writes violate the constraint and Smartlead retries the 500 forever.
+untouched. No new migration: `bounced` / `sent_email` are already in the
+`email_status` CHECK (migration 007).
 
-Setup: apply migration 007, import the workflow, select the Supabase
-Postgres credential in the "Apply to DB" node, **activate it** (an inactive
-workflow silently stops recording unsubscribes — a compliance risk, hence
-the heartbeat events), then register its URL in Smartlead's webhook settings
-subscribed to the unsubscribe, bounce, reply and sent events. Still deferred
-(so n8n's blast radius stays small): the Resend `List-Unsubscribe` header
-and a Resend-side webhook, i.e. the opted-in path's own outcome feedback.
+Setup: import `docs/n8n-mailjet-events.json`, select the Supabase Postgres
+credential in the "Apply to DB" node, **activate it** (an inactive workflow
+silently stops recording unsubscribes — a compliance risk, hence the
+heartbeat events), then add an Event API webhook in Mailjet (Account →
+Event tracking / triggers) pointed at the workflow URL, subscribed to
+sent, bounce, blocked, spam and unsub. The legacy Smartlead webhook
+(`docs/n8n-suppression-webhook.json`) stays importable for any campaign
+still sending through the Smartlead cutover fallback. Still deferred (so
+n8n's blast radius stays small): the Resend `List-Unsubscribe` header and a
+Resend-side webhook, i.e. the opted-in path's own outcome feedback.
 
 ## Tests
 

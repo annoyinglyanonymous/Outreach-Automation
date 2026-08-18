@@ -37,7 +37,7 @@ async def test_tick_starts_a_ready_stage(spy):
 
 @pytest.mark.asyncio
 async def test_tick_skips_stage_with_missing_config(spy):
-    spy["missing"]["email"] = ["SMARTLEAD_API_KEY or RESEND_API_KEY"]
+    spy["missing"]["email"] = ["MAILJET_API_KEY+MAILJET_SECRET_KEY, RESEND_API_KEY, or SMARTLEAD_API_KEY"]
     await scheduler._tick("email")
     assert spy["started"] == []
 

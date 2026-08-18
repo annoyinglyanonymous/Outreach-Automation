@@ -2,7 +2,7 @@
 
 Python/FastAPI outreach pipeline: ingest contacts → find LinkedIn
 profiles (Apollo) → scrape them (Apify) → AI-verify the match → draft
-copy (LLM) → human review → send (Smartlead/Resend). ~800–900 contacts
+copy (LLM) → human review → send (Mailjet/Resend). ~800–900 contacts
 per campaign; **correctness and message quality matter far more than
 speed.** See `README.md` for the full architecture and failure
 semantics — it is unusually detailed and is the source of truth.

@@ -1,0 +1,90 @@
+{
+  "name": "Outreach — Mailjet Event API (suppression + outcomes)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "mailjet-events",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "c3d4e5f6-0001-4000-8000-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "c3d4e5f6-0001-4000-8000-0000000000ff"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Classify Mailjet Event API events into two independent effects:\n//   reason    (non-empty) -> add the address to the suppression list\n//   newStatus (non-empty) -> advance the contact's email_status\n//\n// Mailjet is SEND-ONLY: it emits sent/open/click/bounce/blocked/spam/unsub\n// but NEVER a reply, so there is no 'replied' path here (that KPI has no\n// Mailjet source without a separate inbound-parse setup). Contacts are\n// matched by the CustomID we stamp on every send ('outreach-contact-<id>');\n// suppression is global and email-keyed. Mailjet may batch events into an\n// array, so emit one item per event. Status writes never move a contact\n// backwards (see the SQL): 'sent_email' only resolves a contact stuck at\n// 'sending', so at-most-one-send holds.\nconst raw = $json.body ?? $json;\nconst events = Array.isArray(raw) ? raw : [raw];\n\nreturn events.map((ev) => {\n  const type = String(ev.event ?? '').toLowerCase();\n  const email = String(ev.email ?? '').trim().toLowerCase();\n  const customId = String(ev.CustomID ?? ev.custom_id ?? '').trim();\n  const m = customId.match(/(\\d+)\\s*$/);\n  const contactId = m ? m[1] : '';\n  const hardBounce = ev.hard_bounce === true\n    || String(ev.hard_bounce).toLowerCase() === 'true';\n\n  let reason = '';      // -> suppression insert\n  let newStatus = '';   // -> contacts.email_status\n  let eventType = '';\n\n  if (type === 'unsub')        { reason = 'unsubscribed';   eventType = 'suppression_added'; }\n  else if (type === 'spam')    { reason = 'spam_complaint'; eventType = 'spam_suppressed'; }\n  else if (type === 'blocked') { reason = 'blocked';        eventType = 'blocked_suppressed'; }\n  else if (type === 'bounce' && hardBounce) {\n    reason = 'hard_bounce'; newStatus = 'bounced'; eventType = 'bounce_suppressed';\n  } else if (type === 'sent')  { newStatus = 'sent_email';  eventType = 'send_confirmed'; }\n  // open / click / soft bounce -> ignored\n\n  const relevant = Boolean(email) && (reason !== '' || newStatus !== '');\n  return { json: { relevant, email, reason, newStatus, contactId, eventType } };\n});"
+      },
+      "id": "c3d4e5f6-0002-4000-8000-000000000002",
+      "name": "Classify event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            { "value1": "={{ $json.relevant }}", "value2": true }
+          ]
+        }
+      },
+      "id": "c3d4e5f6-0003-4000-8000-000000000003",
+      "name": "Actionable?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH sup AS (\n  INSERT INTO suppression (email, reason)\n  SELECT $1, $2\n  WHERE $2 <> '' AND $1 <> ''\n    AND NOT EXISTS (SELECT 1 FROM suppression WHERE lower(email) = lower($1))\n  RETURNING 1\n),\nupd AS (\n  UPDATE contacts c\n     SET email_status = $3, last_action_at = now()\n   WHERE $3 <> ''\n     AND c.id = NULLIF($4, '')::bigint\n     AND (\n       ($3 = 'sent_email' AND c.email_status = 'sending')\n       OR ($3 = 'bounced' AND c.email_status IN ('sending','sent_email'))\n     )\n  RETURNING 1\n)\nINSERT INTO events (contact_id, channel, event_type, payload)\nSELECT NULL, 'email', $5,\n       jsonb_build_object('email', $1::text, 'reason', $2::text,\n                          'new_status', $3::text, 'contact_id', $4::text,\n                          'source', 'mailjet_webhook',\n                          'suppressed', (SELECT count(*) FROM sup) > 0,\n                          'status_updated', (SELECT count(*) FROM upd) > 0)\n WHERE (SELECT count(*) FROM sup) > 0 OR (SELECT count(*) FROM upd) > 0;",
+        "options": {
+          "queryReplacement": "={{ $json.email }},{{ $json.reason }},{{ $json.newStatus }},{{ $json.contactId }},{{ $json.eventType }}"
+        }
+      },
+      "id": "c3d4e5f6-0004-4000-8000-000000000004",
+      "name": "Apply to DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [680, -100]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "ok",
+        "options": {}
+      },
+      "id": "c3d4e5f6-0005-4000-8000-000000000005",
+      "name": "200 OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [920, 0]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Classify event", "type": "main", "index": 0 }]]
+    },
+    "Classify event": {
+      "main": [[{ "node": "Actionable?", "type": "main", "index": 0 }]]
+    },
+    "Actionable?": {
+      "main": [
+        [{ "node": "Apply to DB", "type": "main", "index": 0 }],
+        [{ "node": "200 OK", "type": "main", "index": 0 }]
+      ]
+    },
+    "Apply to DB": {
+      "main": [[{ "node": "200 OK", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

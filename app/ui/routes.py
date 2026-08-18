@@ -21,7 +21,7 @@ from starlette.datastructures import UploadFile
 from .. import campaign_brief, drafting, repo, runs
 from ..config import config
 from ..drafting import NOTE_MAX_CHARS
-from ..providers import n8n, smartlead, supabase_auth
+from ..providers import n8n, supabase_auth
 from ..providers.base import ProviderError
 from . import router, templates
 from .auth import (
@@ -428,27 +428,6 @@ _BRIEF_FLASHES = {
     "fallback": ("warn", "Brief defaults used (LLM unavailable) — the objective was saved "
                          "as the offer description; refine the fields below."),
 }
-_SMARTLEAD_FLASHES = {
-    "ok": ("ok", "Smartlead campaign created and fully configured: shell sequence, "
-                 "mailboxes, schedule — active and ready to send."),
-    "failed": ("error", "Smartlead setup failed — nothing was created. "
-                        "Use “Set up Smartlead” below to retry."),
-    "unconfigured": ("warn", "SMARTLEAD_API_KEY is not set — cold sends need it. "
-                             "Set it and use “Set up Smartlead” below."),
-    "exists": ("warn", "This campaign already has a Smartlead campaign id — "
-                       "rebuilding would create a duplicate campaign in Smartlead, "
-                       "so nothing was done."),
-    "partial-sequence": ("warn", "Smartlead campaign created, but saving the sequence failed — "
-                                 "add the {{personalized_subject}} / {{personalized_body}} shell "
-                                 "in Smartlead, then activate."),
-    "partial-email-accounts": ("warn", "Smartlead campaign created, but no mailbox was attached — "
-                                       "either none is connected, or your selected send-from mailboxes "
-                                       "aren't connected. Fix it in Smartlead, then activate."),
-    "partial-schedule": ("warn", "Smartlead campaign created, but setting the schedule failed — "
-                                 "set it in Smartlead, then activate."),
-    "partial-activate": ("warn", "Smartlead campaign configured but not activated — "
-                                 "press Start in Smartlead."),
-}
 _INGEST_FLASHES = {
     "invalid": ("error", "The CSV could not be used — upload it again below."),
     "failed": ("error", "Contact ingestion is unreachable — the campaign is fine; "
@@ -460,7 +439,6 @@ def _campaign_flashes(request: Request) -> list[dict]:
     flashes = []
     params = request.query_params
     for key, table in (("brief", _BRIEF_FLASHES),
-                       ("smartlead", _SMARTLEAD_FLASHES),
                        ("ingest", _INGEST_FLASHES)):
         entry = table.get(params.get(key, ""))
         if entry:
@@ -486,26 +464,14 @@ async def campaign_edit(request: Request, campaign_id: int,
 
 
 async def _campaign_fields(request: Request) -> dict:
-    # CAMPAIGN_UPDATE_FIELDS, not CAMPAIGN_FIELDS: smartlead_campaign_id
-    # is written by the auto-setup path, so reading it back from a form
-    # that may predate that write would revert it.
+    # CAMPAIGN_UPDATE_FIELDS, not CAMPAIGN_FIELDS: smartlead_campaign_id is
+    # kept out of the edit update (it is inert now that cold sends via
+    # Mailjet, but excluding it avoids resurrecting the stale-revert bug).
     form = await request.form()
     fields = {f: (str(form.get(f) or "").strip() or None)
               for f in repo.CAMPAIGN_UPDATE_FIELDS}
     fields["status"] = fields["status"] or "active"
     return fields
-
-
-def _selected_mailboxes(form) -> list[str]:
-    """Send-from addresses ticked in the mailbox picker (a checkbox group,
-    so getlist not get). Trimmed, deduped, order-stable; empty means 'all
-    connected mailboxes'."""
-    seen: list[str] = []
-    for value in form.getlist("mailboxes"):
-        addr = str(value or "").strip()
-        if addr and addr not in seen:
-            seen.append(addr)
-    return seen
 
 
 def _brief_from_form(form) -> dict:
@@ -542,32 +508,12 @@ def _oversize(file: UploadFile) -> int | None:
     return None
 
 
-async def _setup_smartlead(name: str, campaign_id: int,
-                           mailboxes: list[str] | None = None) -> str:
-    """Run the Smartlead auto-setup and persist the id. Returns the flash
-    enum. Never raises — a vendor failure must not fail campaign creation.
-
-    `mailboxes` (send-from addresses) is passed through to the attach step;
-    None/empty attaches every connected mailbox (the default)."""
-    if not config.SMARTLEAD_API_KEY:
-        return "unconfigured"
-    try:
-        setup = await smartlead.setup_campaign(name, mailboxes)
-    except ProviderError as exc:
-        log.error("smartlead setup failed for campaign %d: %s", campaign_id, exc)
-        return "failed"
-    # The id is written even on partial setup — it is what makes the
-    # campaign sendable; the flash names the step to finish by hand.
-    await repo.set_smartlead_campaign_id(campaign_id, setup.campaign_id)
-    return f"partial-{setup.failed_step}" if setup.failed_step else "ok"
-
-
 @router.post("/campaigns", response_class=HTMLResponse)
 async def campaign_create(request: Request, session: Session = Depends(require_session)):
     """Quick create: name + objective + sender (+ optional CSV). The
-    objective is LLM-expanded into the brief; Smartlead is built
-    automatically; every vendor step is best-effort and reported via
-    redirect flashes — only the DB insert can abort creation."""
+    objective is LLM-expanded into the brief; only the DB insert can abort
+    creation. Cold campaigns send via Mailjet from the campaign's
+    sender_email — set it on the edit page before the campaign can send."""
     check_origin(request)
     form = await request.form()
     name = str(form.get("name") or "").strip()
@@ -575,7 +521,6 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
     sender_name = str(form.get("sender_name") or "").strip() or None
     sender_role = str(form.get("sender_role") or "").strip() or None
     file = form.get("file")
-    mailboxes = _selected_mailboxes(form)
 
     def invalid(message: str):
         return _page(request, "campaign_new.html", session, "campaigns", {
@@ -597,8 +542,10 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
     # channel_policy is NOT NULL + CHECK(linkedin_then_email |
     # email_then_linkedin | linkedin_only | email_only) → email_only,
     # because phase 1 sends email only (LinkedIn is phase 2; switch per
-    # campaign on the edit page). sender_email / smartlead_campaign_id
-    # stay NULL — the send claim reads NULL as "not configured".
+    # campaign on the edit page). sender_email stays NULL — the send claim
+    # reads NULL as "not configured", so a cold campaign is unsendable
+    # (surfaced, not silently dropped) until its verified Mailjet
+    # sender_email is set on the edit page. smartlead_campaign_id is inert.
     fields = {f: "" for f in repo.CAMPAIGN_FIELDS}
     fields.update({"sender_email": None, "smartlead_campaign_id": None})
     fields.update(brief)
@@ -615,11 +562,7 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
     except asyncpg.PostgresError as exc:
         return invalid(str(exc))
 
-    # Persist the mailbox selection before setup so a later "Set up
-    # Smartlead" retry reuses it, and pass it to the first attach.
-    await repo.set_campaign_mailboxes(campaign_id, mailboxes or None)
-    outcome = {"brief": brief_source,
-               "smartlead": await _setup_smartlead(name, campaign_id, mailboxes or None)}
+    outcome = {"brief": brief_source}
 
     if isinstance(file, UploadFile) and file.filename:
         try:
@@ -641,74 +584,6 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
 
     query = "&".join(f"{k}={v}" for k, v in outcome.items())
     return RedirectResponse(f"/ui/campaigns/{campaign_id}?{query}", status_code=303)
-
-
-@router.post("/campaigns/{campaign_id}/smartlead-setup")
-async def campaign_smartlead_setup(request: Request, campaign_id: int,
-                                   session: Session = Depends(require_session)):
-    """Retry (or first-time, for pre-existing campaigns) Smartlead setup."""
-    check_origin(request)
-    campaign = await repo.get_campaign(campaign_id)
-    if campaign is None:
-        raise HTTPException(status_code=404)
-    if campaign.get("smartlead_campaign_id"):
-        # Re-running would create a duplicate Smartlead campaign; clearing
-        # the field on the edit form is the explicit opt-in to rebuild.
-        outcome = "exists"
-    else:
-        outcome = await _setup_smartlead(campaign["name"], campaign_id,
-                                         campaign.get("smartlead_mailboxes"))
-    return RedirectResponse(f"/ui/campaigns/{campaign_id}?smartlead={outcome}",
-                            status_code=303)
-
-
-@router.get("/fragments/mailboxes", response_class=HTMLResponse)
-async def mailboxes_fragment(request: Request, campaign_id: int | None = None,
-                            session: Session = Depends(require_session)):
-    """Connected-mailbox checkboxes for the send-from picker, lazy-loaded by
-    htmx on the new/edit campaign forms. A read-only GET (no check_origin,
-    like the stats/events fragments). Degrades to a note when Smartlead is
-    unconfigured or unreachable — the picker is optional; a campaign with no
-    selection sends from all mailboxes."""
-    selected: list[str] = []
-    if campaign_id is not None:
-        campaign = await repo.get_campaign(campaign_id)
-        selected = list(campaign.get("smartlead_mailboxes") or []) if campaign else []
-
-    accounts: list[dict] = []
-    error = None
-    if not config.SMARTLEAD_API_KEY:
-        error = "Smartlead isn't configured — the campaign will use all mailboxes."
-    else:
-        try:
-            accounts = await smartlead.list_email_accounts()
-        except ProviderError as exc:
-            log.error("mailbox picker: %s", exc)
-            error = "Couldn't load mailboxes from Smartlead — the campaign will use all."
-    return templates.TemplateResponse(request, "fragments/_mailboxes.html", {
-        "accounts": accounts,
-        "selected": {s.strip().lower() for s in selected},
-        "error": error,
-    })
-
-
-@router.post("/campaigns/{campaign_id}/mailboxes", response_class=HTMLResponse)
-async def campaign_mailboxes(request: Request, campaign_id: int,
-                             session: Session = Depends(require_session)):
-    """Persist the campaign's send-from mailbox selection. It applies on the
-    next Smartlead setup/retry; an already-set-up campaign is NOT re-attached
-    here — rebuild it (clear the Smartlead id and re-run) to change a live
-    campaign's mailboxes."""
-    check_origin(request)
-    campaign = await repo.get_campaign(campaign_id)
-    if campaign is None:
-        raise HTTPException(status_code=404)
-    mailboxes = _selected_mailboxes(await request.form())
-    await repo.set_campaign_mailboxes(campaign_id, mailboxes or None)
-    return templates.TemplateResponse(request, "fragments/_mailboxes_result.html", {
-        "count": len(mailboxes),
-        "already_setup": bool(campaign.get("smartlead_campaign_id")),
-    })
 
 
 @router.post("/campaigns/{campaign_id}/preview", response_class=HTMLResponse)

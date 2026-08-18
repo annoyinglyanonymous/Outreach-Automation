@@ -86,7 +86,7 @@ async def root() -> dict:
             "POST /enrich/run": "start an enrichment run (requires x-api-key header)",
             "POST /scrape/run": "collect finished Apify runs, start new ones (requires x-api-key header)",
             "POST /draft/run": "draft emails + LinkedIn notes for scraped contacts (requires x-api-key header)",
-            "POST /email/run": "send approved drafts via Smartlead (cold) / Resend (opted-in) (requires x-api-key header)",
+            "POST /email/run": "send approved drafts via Mailjet (cold) / Resend (opted-in) (requires x-api-key header)",
         },
     }
 

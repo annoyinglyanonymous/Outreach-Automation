@@ -547,9 +547,12 @@ async def reset_stale_draft_claims() -> int:
 # =====================================================================
 
 # The claim picks only rows that can actually send right now: active
-# campaign, a consent path whose API key is configured ($1), and the
-# per-consent campaign config present. Misconfigured campaigns are never
-# claimed (see unsendable_approved_counts) so they cannot starve others.
+# campaign, a consent path whose API key is configured ($1), and a verified
+# sender address on the campaign. Both send paths are now transactional
+# ESPs (cold -> Mailjet, opted_in -> Resend) that send from a verified
+# sender_email, so the readiness column is the same for both. Misconfigured
+# campaigns are never claimed (see unsendable_approved_counts) so they
+# cannot starve others.
 CLAIM_EMAIL_SQL = """
 WITH claimed AS (
     SELECT c.id
@@ -559,8 +562,7 @@ WITH claimed AS (
        AND c.review_status = 'approved'
        AND g.status = 'active'
        AND g.consent_status = ANY($1::text[])
-       AND (   (g.consent_status = 'cold'     AND g.smartlead_campaign_id IS NOT NULL)
-            OR (g.consent_status = 'opted_in' AND g.sender_email IS NOT NULL))
+       AND g.sender_email IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM suppression s
                         WHERE lower(s.email) = lower(c.email))
      ORDER BY c.created_at
@@ -714,9 +716,7 @@ SELECT g.name AS campaign_name,
              THEN 'campaign not active'
          WHEN NOT (g.consent_status = ANY($1::text[]))
              THEN 'no API key configured for consent ' || coalesce(g.consent_status, 'NULL')
-         WHEN g.consent_status = 'cold' AND g.smartlead_campaign_id IS NULL
-             THEN 'missing smartlead_campaign_id'
-         WHEN g.consent_status = 'opted_in' AND g.sender_email IS NULL
+         WHEN g.sender_email IS NULL
              THEN 'missing sender_email'
          ELSE 'unsupported consent ' || coalesce(g.consent_status, 'NULL')
        END AS reason,
@@ -733,8 +733,7 @@ SELECT g.name AS campaign_name,
    -- it be reached.
    AND (g.status = 'active'
     AND g.consent_status = ANY($1::text[])
-    AND ((g.consent_status = 'cold'     AND g.smartlead_campaign_id IS NOT NULL)
-      OR (g.consent_status = 'opted_in' AND g.sender_email IS NOT NULL))) IS NOT TRUE
+    AND g.sender_email IS NOT NULL) IS NOT TRUE
  GROUP BY 1, 2
  ORDER BY 1, 2;
 """

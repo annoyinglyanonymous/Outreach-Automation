@@ -6,7 +6,7 @@
   <div>
     <h1>New campaign</h1>
     <p class="hint"><a href="/ui/campaigns">Campaigns</a> / New — name it, say what
-    it's for, attach contacts. The brief and the Smartlead campaign are built for you.</p>
+    it's for, attach contacts. The brief is written for you from the objective.</p>
   </div>
 </div>
 
@@ -34,19 +34,9 @@
     </div>
   </div>
 
-  {# Lazy-loaded inside the form so the ticked boxes post with it (getlist).
-     None ticked = attach all connected mailboxes — the prior behaviour. #}
-  <div class="mailbox-picker" style="margin-top:16px">
-    <span class="picker-head">Send-from mailboxes <span class="sub">optional — which connected
-    Smartlead inboxes this campaign uses. Leave all unticked to use every mailbox.</span></span>
-    <div id="mailbox-picker" hx-get="/ui/fragments/mailboxes" hx-trigger="load">
-      <p class="hint">Loading connected mailboxes…</p>
-    </div>
-  </div>
-
-  <p class="hint" style="margin-top:16px">Consent: cold — sends via Smartlead. A Smartlead
-  campaign is created and configured automatically (sequence, mailboxes, schedule, active).
-  Switch to opted_in / Resend on the edit page after creation.</p>
+  <p class="hint" style="margin-top:16px">New campaigns are created as cold (sends via
+  Mailjet). Set a Mailjet-verified <strong>sender email</strong> on the edit page before the
+  campaign can send, or switch to opted_in / Resend there.</p>
   <button type="submit">Create campaign</button>
 </form>
 {% endblock %}

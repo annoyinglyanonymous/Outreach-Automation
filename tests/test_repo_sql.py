@@ -71,11 +71,12 @@ def test_a_redraft_cannot_regress_a_contact_that_is_already_sending():
 
 
 def test_the_edit_form_cannot_write_smartlead_campaign_id():
-    """That column has a second, non-human writer (the Smartlead
+    """That column had a second, non-human writer (the Smartlead
     auto-setup). Including it in the full-row update let a form rendered
-    BEFORE setup ran write its stale empty value back over the new id,
-    silently making a cold campaign unsendable — the claim requires
-    consent 'cold' AND smartlead_campaign_id IS NOT NULL. Fixed 2026-08-12.
+    BEFORE setup ran write its stale empty value back over the new id.
+    Fixed 2026-08-12. The cold send-gate is now sender_email (Mailjet), so
+    the column is inert — kept out of the edit update all the same, for
+    rollback and to avoid resurrecting the regression.
     """
     assert "smartlead_campaign_id" not in repo.CAMPAIGN_UPDATE_FIELDS
     assert "smartlead_campaign_id" not in repo.UPDATE_CAMPAIGN_SQL

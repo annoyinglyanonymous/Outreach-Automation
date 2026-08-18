@@ -100,9 +100,13 @@ class Config:
     VERIFY_BATCH_SIZE: int = _int("VERIFY_BATCH_SIZE", 25)
 
     # --- email sending (stage 4) -------------------------------------------
-    # Cold campaigns send via Smartlead, opted-in via Resend; the claim
-    # only picks consents whose key is configured, so either can be
-    # deployed alone.
+    # Cold campaigns send via Mailjet, opted-in via Resend; the claim only
+    # picks consents whose key is configured, so either can be deployed
+    # alone. Mailjet uses a key/secret pair (HTTP Basic auth). Smartlead is
+    # retained as a cutover fallback (used for cold only if the Mailjet
+    # pair is unset).
+    MAILJET_API_KEY: str = os.getenv("MAILJET_API_KEY", "")
+    MAILJET_SECRET_KEY: str = os.getenv("MAILJET_SECRET_KEY", "")
     SMARTLEAD_API_KEY: str = os.getenv("SMARTLEAD_API_KEY", "")
     RESEND_API_KEY: str = os.getenv("RESEND_API_KEY", "")
     SEND_BATCH_SIZE: int = _int("SEND_BATCH_SIZE", 25)
@@ -211,10 +215,11 @@ class Config:
     @classmethod
     def missing_email_vars(cls) -> list[str]:
         """Non-empty only when NO send path is configured at all — one
-        key is enough to run that consent's queue."""
-        if cls.SMARTLEAD_API_KEY or cls.RESEND_API_KEY:
+        key (or the Mailjet pair) is enough to run that consent's queue."""
+        if ((cls.MAILJET_API_KEY and cls.MAILJET_SECRET_KEY)
+                or cls.SMARTLEAD_API_KEY or cls.RESEND_API_KEY):
             return []
-        return ["SMARTLEAD_API_KEY or RESEND_API_KEY"]
+        return ["MAILJET_API_KEY+MAILJET_SECRET_KEY, RESEND_API_KEY, or SMARTLEAD_API_KEY"]
 
     @classmethod
     def missing_ui_vars(cls) -> list[str]:

@@ -455,21 +455,12 @@ def test_a_verdict_that_did_not_apply_is_reported_not_collapsed(
     assert calls["nudges"] == []            # and the send gate stayed shut
 
 
-def _campaign_row(campaign_id=5, **overrides):
-    row = {f: "" for f in repo.CAMPAIGN_FIELDS}
-    row.update({"id": campaign_id, "name": "Validation", "status": "active",
-                "consent_status": "cold", "channel_policy": "email_only",
-                "smartlead_campaign_id": "sl-1", "sender_email": None})
-    row.update(overrides)
-    return row
-
-
 def test_saving_a_campaign_cannot_revert_the_smartlead_id(client, session_cookie,
                                                           monkeypatch):
-    """A form rendered before Smartlead setup ran carries an empty id.
-    Saving an unrelated edit from it must not write that emptiness back
-    over the id setup has since created — that silently makes a cold
-    campaign unsendable (the claim needs it NOT NULL)."""
+    """smartlead_campaign_id is inert now that cold sends via Mailjet, but
+    it stays out of CAMPAIGN_UPDATE_FIELDS: a stray post of it (e.g. from an
+    old cached form) must never round-trip into an UPDATE. Guards against
+    resurrecting the stale-revert bug the exclusion was added to fix."""
     seen = {}
 
     async def update_campaign(campaign_id, fields):
@@ -481,27 +472,12 @@ def test_saving_a_campaign_cannot_revert_the_smartlead_id(client, session_cookie
     response = client.post("/ui/campaigns/5", cookies=session_cookie, data={
         "name": "Validation",
         "tone": "warmer",
-        "smartlead_campaign_id": "",     # stale — setup has since written one
+        "smartlead_campaign_id": "9999",   # a stray post must be ignored
     })
 
     assert response.status_code == 303
     assert "smartlead_campaign_id" not in seen["fields"]
     assert seen["fields"]["tone"] == "warmer"
-
-
-def test_edit_form_shows_the_smartlead_id_but_never_posts_it(client, session_cookie,
-                                                             monkeypatch):
-    """Read-only, not hidden: the operator still needs to see it, but the
-    input carries no name= so a Save cannot round-trip it."""
-    async def get_campaign(campaign_id):
-        return _campaign_row(campaign_id)
-
-    monkeypatch.setattr(repo, "get_campaign", get_campaign)
-
-    body = client.get("/ui/campaigns/5", cookies=session_cookie).text
-
-    assert "sl-1" in body
-    assert 'name="smartlead_campaign_id"' not in body
 
 
 def test_oversized_csv_is_refused_before_it_is_read(client, session_cookie,

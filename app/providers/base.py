@@ -55,6 +55,15 @@ class SendRejected(Exception):
     failure — the run marks it failed and continues."""
 
 
+class SendUncertain(Exception):
+    """The send may or may not have landed — an ambiguous failure AFTER
+    the request left us (a read timeout, a broken response). With a
+    provider that has no idempotency key (Mailjet), we cannot retry or
+    release: either could double-send. The runner leaves the contact at
+    'sending' to be surfaced as stuck and resolved by a human, upholding
+    invariant #1 (at most one first-touch email per contact, ever)."""
+
+
 @runtime_checkable
 class EmailSender(Protocol):
     """What the email runner needs from a delivery vendor. Returns a
