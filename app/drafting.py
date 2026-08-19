@@ -104,9 +104,13 @@ DEFAULT_SYSTEM_PROMPT = (
     "detail you were not given or mention how the data was obtained.\n\n"
     "Write a short cold email between 60 and 90 words. Shorter is better.\n\n"
     "Structure:\n"
-    "1. One or two sentences of personalization based on the supplied data, "
-    "tied naturally to agency value, book composition, retention, or "
-    "ownership.\n"
+    "1. One or two sentences of personalization built on a concrete FACT from "
+    "the supplied data (producer count, book size, market, tenure, ownership), "
+    "pointed at value: what that fact means for what the agency is worth. "
+    "Never compliment or evaluate the prospect. Words like \"impressive\", "
+    "\"solid\", or \"great\" end on your opinion; end on the fact's implication "
+    "instead. Example: \"With 13 producers at Acme Insurance, you're at the "
+    "size where owners start asking what the book is actually worth.\"\n"
     "2. One or two sentences pitching the Agency Value Calculator: it gives "
     "an estimated current-market valuation in about 60 seconds, no sales "
     "call required.\n"
@@ -140,17 +144,27 @@ DEFAULT_SYSTEM_PROMPT = (
     "separately by the automation."
 )
 
-# The fixed mechanical scaffold appended to a campaign's stored objective.
-# These four rules are load-bearing — the pipeline breaks without them — so
-# they hold no matter what the objective says: paragraphs feed the HTML
-# renderer, only a strict https anchor survives it, invented details are the
-# one unforgivable content bug, and the signature is appended at send time
-# (anything the model adds would double-sign). Everything else about the
-# email — audience, product, structure, tone, links — is the objective's.
+# The fixed mechanical scaffold, appended to EVERY system prompt (a campaign's
+# stored objective, or the default above). These rules are load-bearing — the
+# pipeline breaks or the mail embarrasses the sender without them — so they
+# hold no matter what the objective says: paragraphs feed the HTML renderer,
+# only a strict https anchor survives it, invented details are the one
+# unforgivable content bug, internal list fields must never leak to the
+# recipient (a live "Tier 1 market" slipped into copy), a malformed company
+# name must not lead the email ("Bb Insurance Marketing" did), and the
+# signature is appended at send time (anything the model adds would
+# double-sign). Everything else — audience, product, structure, tone, links —
+# belongs to the objective.
 PROMPT_SCAFFOLD = (
     "MECHANICAL RULES (these override anything above):\n"
     "- Personalize only from the supplied prospect data. Never invent a "
     "detail you were not given, and never mention how the data was obtained.\n"
+    "- The prospect data may include internal list fields (tiers, scores, "
+    "ranks, segments, lead source, notes). Never mention or hint at these — "
+    "reference only facts the recipient already knows about themselves, such "
+    "as their market, role, team size, or location.\n"
+    "- If a company or agency name in the data looks malformed, truncated, or "
+    "like a placeholder, do not use it verbatim; say \"your agency\" instead.\n"
     "- Format the body as two or three short paragraphs separated by blank "
     "lines. Never write the whole email as one paragraph.\n"
     "- Any link must appear exactly once, embedded in a natural sentence as "
@@ -163,18 +177,71 @@ PROMPT_SCAFFOLD = (
     "automatically by the automation."
 )
 
+# Company strings that are a whole generic word, a placeholder, or carry a
+# truncated/auto-capitalised token ("Bb ...") are source-data defects: leading
+# the email with one is worse than not naming the company at all, so the
+# prospect block falls back to 'unknown' and the model personalizes from role,
+# market, or size instead (both prompts instruct that for sparse data).
+_GENERIC_COMPANY = {
+    "insurance", "agency", "company", "llc", "inc", "corp", "corporation",
+    "unknown", "none", "null", "test", "sample", "tbd", "n/a", "na",
+}
+_PLACEHOLDER_TOKENS = {"null", "n/a", "na", "unknown", "none", "test",
+                       "sample", "tbd"}
+# Exactly two letters, same letter, mixed case ("Bb", "Ss"): the classic
+# auto-capitalised truncation defect. Deliberately NOT flagging all-caps
+# acronyms ("AA Insurance") or real particles ("La Familia Insurance").
+_DEFECT_TOKEN_RE = re.compile(r"^([A-Z])([a-z])$")
+
+
+def suspicious_company(name: str | None) -> bool:
+    """True when a company name looks like a source-data defect rather than a
+    real name — conservative on purpose: a false positive only costs one
+    personalization hook, a false negative puts garbage in the first line."""
+    name = (name or "").strip()
+    if not name:
+        return False                       # absent is handled as 'unknown' anyway
+    if len(name) < 3 or len(name) > 60:
+        return True
+    if not any(ch.isalpha() for ch in name):
+        return True
+    tokens = name.split()
+    if len(tokens) == 1 and tokens[0].lower().strip(".,&") in _GENERIC_COMPANY:
+        return True
+    for token in tokens:
+        if token.lower() in _PLACEHOLDER_TOKENS:
+            return True
+        match = _DEFECT_TOKEN_RE.fullmatch(token)
+        if match and match.group(1).lower() == match.group(2):
+            return True
+    return False
+
+
+def _prospect_block(target: "repo.DraftTarget") -> str:
+    """The shared Prospect header of the user prompt. A company name that fails
+    the sanity check is withheld (shown as 'unknown') so a data defect can
+    never lead the email; the scaffold's malformed-name rule is the backstop
+    for the copy of the name inside the raw profile/sheet JSON."""
+    company = (target.company or "").strip()
+    if suspicious_company(company):
+        company = ""
+    return (
+        "Prospect:\n"
+        f"- Name: {target.first_name} {target.last_name or ''}\n"
+        f"- Title: {target.title or 'unknown'}\n"
+        f"- Company: {company or 'unknown'}\n"
+    )
+
 
 def build_prompts(target: "repo.DraftTarget") -> tuple[str, str]:
-    # The campaign's stored objective IS its drafting prompt (migration 018),
-    # wrapped with the fixed mechanical scaffold; a campaign without one gets
-    # the built-in default. Editable on the campaign page, so prompt iteration
-    # is edit -> test email -> release, with no code change per campaign.
+    # The campaign's stored objective IS its drafting prompt (migration 018);
+    # a campaign without one gets the built-in default. Either way the fixed
+    # mechanical scaffold is appended — its rules hold for every campaign.
+    # Editable on the campaign page, so prompt iteration is edit -> test email
+    # -> release, with no code change per campaign.
     campaign = target.campaign or {}
     objective = str(campaign.get("objective") or "").strip()
-    if objective:
-        system = objective + "\n\n" + PROMPT_SCAFFOLD
-    else:
-        system = DEFAULT_SYSTEM_PROMPT
+    system = (objective or DEFAULT_SYSTEM_PROMPT) + "\n\n" + PROMPT_SCAFFOLD
 
     profile = json.dumps(target.profile_data or {}, ensure_ascii=False)
     if len(profile) > config.DRAFT_PROFILE_CHAR_LIMIT:
@@ -184,20 +251,17 @@ def build_prompts(target: "repo.DraftTarget") -> tuple[str, str]:
         profile = profile[: config.DRAFT_PROFILE_CHAR_LIMIT]
 
     user = (
-        "Prospect:\n"
-        f"- Name: {target.first_name} {target.last_name or ''}\n"
-        f"- Title: {target.title or 'unknown'}\n"
-        f"- Company: {target.company or 'unknown'}\n\n"
-        f"LinkedIn profile data (JSON, may be truncated):\n{profile}"
+        _prospect_block(target)
+        + f"\nLinkedIn profile data (JSON, may be truncated):\n{profile}"
     )
     return system, user
 
 
 def build_csv_prompts(target: "repo.DraftTarget") -> tuple[str, str]:
-    """The CSV-only counterpart to build_prompts: same fixed system prompt, but
-    the user block personalizes from the contact's captured sheet columns
-    (extra_data) instead of a scraped LinkedIn profile. Reuses build_prompts for
-    the system so the voice/rules stay identical."""
+    """The CSV-only counterpart to build_prompts: same system prompt, but the
+    user block personalizes from the contact's captured sheet columns
+    (extra_data) instead of a scraped LinkedIn profile. Reuses build_prompts
+    for the system so the voice/rules stay identical."""
     system, _ = build_prompts(target)
     extra = json.dumps(target.extra_data or {}, ensure_ascii=False)
     if len(extra) > config.DRAFT_PROFILE_CHAR_LIMIT:
@@ -205,12 +269,9 @@ def build_csv_prompts(target: "repo.DraftTarget") -> tuple[str, str]:
         # serialises first and the prompt says the data may be cut off.
         extra = extra[: config.DRAFT_PROFILE_CHAR_LIMIT]
     user = (
-        "Prospect:\n"
-        f"- Name: {target.first_name} {target.last_name or ''}\n"
-        f"- Title: {target.title or 'unknown'}\n"
-        f"- Company: {target.company or 'unknown'}\n\n"
-        "Additional details from the uploaded list (JSON, may be truncated) — "
-        "personalize from these where they help:\n"
+        _prospect_block(target)
+        + "\nAdditional details from the uploaded list (JSON, may be "
+        "truncated) — personalize from these where they help:\n"
         f"{extra}"
     )
     return system, user

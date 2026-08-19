@@ -158,23 +158,82 @@ def test_a_stored_objective_becomes_the_prompt_wrapped_in_the_scaffold():
 
 
 def test_a_blank_objective_falls_back_to_the_default_prompt():
-    """NULL/empty objective (every pre-018 campaign) keeps today's behaviour:
-    the built-in calculator prompt, no scaffold."""
+    """NULL/empty objective (every pre-018 campaign) keeps the built-in
+    calculator prompt — the mechanical scaffold now rides on EVERY prompt."""
     for empty in (None, "", "   "):
         system, _ = drafting.build_prompts(
             target(profile=PROFILE, campaign={**CAMPAIGN, "objective": empty}))
-        assert system == drafting.DEFAULT_SYSTEM_PROMPT
+        assert system == (drafting.DEFAULT_SYSTEM_PROMPT + "\n\n"
+                          + drafting.PROMPT_SCAFFOLD)
 
 
-def test_the_scaffold_carries_the_four_load_bearing_rules():
+def test_the_scaffold_carries_the_load_bearing_rules():
     """Whatever the objective says, the scaffold enforces the mechanics the
-    pipeline depends on: data-only personalization, blank-line paragraphs,
-    anchor-tag-only links, and no sign-off (the signature is appended)."""
+    pipeline depends on: data-only personalization, no internal-list-field
+    leakage (a live 'Tier 1 market' reached a recipient), a malformed-name
+    backstop, blank-line paragraphs, anchor-tag-only links, and no sign-off
+    (the signature is appended)."""
     s = drafting.PROMPT_SCAFFOLD
     assert "Never invent" in s
+    assert "internal list fields" in s          # tiers/scores never leak
+    assert "malformed" in s                     # defective-name backstop
     assert "separated by blank" in s
     assert "anchor tag" in s.lower()
     assert "appended" in s and "signature" in s.lower()
+
+
+def test_default_prompt_bans_compliments_and_points_facts_at_value():
+    """The personalization beat must state a fact and its value implication —
+    never the sender's opinion ('impressive', 'solid'), which reads as flattery
+    and carries no information (live test-email feedback)."""
+    p = drafting.DEFAULT_SYSTEM_PROMPT
+    assert "Never compliment" in p
+    assert "impressive" in p                    # named as the anti-pattern
+    assert "what the book is actually worth" in p   # the value-pointed example
+
+
+# ---- company-name sanity guard (source-data defects) -------------------
+
+
+@pytest.mark.parametrize("bad", [
+    "Bb Insurance Marketing",   # the live defect: auto-capitalised truncation
+    "Ss Agency",
+    "Insurance",                # single generic token
+    "LLC",
+    "N/A",
+    "test",
+    "12345",                    # no letters
+    "ab",                       # too short
+    "x" * 61,                   # too long
+])
+def test_suspicious_company_flags_defects(bad):
+    assert drafting.suspicious_company(bad) is True
+
+
+@pytest.mark.parametrize("ok", [
+    "Doe Insurance",
+    "BB&T Insurance Services",  # all-caps acronym is legit
+    "La Familia Insurance",     # real particle, not a defect token
+    "Reyes Insurance Group",
+    "A1 Insurance",
+])
+def test_suspicious_company_passes_real_names(ok):
+    assert drafting.suspicious_company(ok) is False
+
+
+def test_a_defective_company_name_is_withheld_from_the_prompt():
+    """'Bb Insurance Marketing' must never lead the email: the prospect block
+    shows 'unknown' so the model personalizes from role/market/size instead
+    (the scaffold's malformed-name rule backstops the raw JSON copy)."""
+    _, user = drafting.build_prompts(
+        target(profile=PROFILE, company="Bb Insurance Marketing"))
+    assert "Company: unknown" in user
+    assert "Bb Insurance Marketing" not in user.split("LinkedIn profile")[0]
+
+    _, csv_user = drafting.build_csv_prompts(
+        target(profile=None, campaign=CSV_CAMPAIGN, extra_data=EXTRA,
+               company="Bb Insurance Marketing"))
+    assert "Company: unknown" in csv_user
 
 
 def test_csv_prompts_use_the_objective_too():
