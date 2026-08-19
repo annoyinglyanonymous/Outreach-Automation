@@ -136,6 +136,14 @@ def test_system_prompt_is_the_calculator_prompt_with_an_anchor_link():
     assert "anchor tag" in system.lower()
 
 
+def test_system_prompt_demands_blank_line_paragraphs():
+    """The HTML part paragraphs on blank lines (render_html_body), so the model
+    must write them — the first live test came out as one unformatted blob."""
+    system, _ = drafting.build_prompts(target(profile=PROFILE))
+    assert "separated by blank lines" in system
+    assert "one paragraph" in system              # "never ... as one paragraph"
+
+
 def test_build_prompts_truncates_huge_profiles(monkeypatch):
     monkeypatch.setattr(config, "DRAFT_PROFILE_CHAR_LIMIT", 200)
     _, user = drafting.build_prompts(target(profile={"blob": "x" * 10_000}))

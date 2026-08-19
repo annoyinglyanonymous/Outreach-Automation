@@ -63,15 +63,18 @@ class CapturingSender:
 
 
 class BodyCapturingSender:
-    """Records the exact body each target arrives with, so a test can assert
-    the signature was appended (or not) at send time."""
+    """Records the exact body + signature each target arrives with, so a test
+    can assert the signature is stamped SEPARATELY (the provider composes the
+    parts) and the body stays unsigned."""
     name = "mailjet"
 
     def __init__(self):
         self.bodies: list = []
+        self.signatures: list = []
 
     async def send(self, t):
         self.bodies.append(t.email_body)
+        self.signatures.append(t.signature)
         return "ref"
 
 
@@ -495,9 +498,11 @@ async def test_sync_pool_drops_non_allowlisted_records(state, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_signature_is_appended_from_the_picked_sender(state):
-    """The drafter writes no closing; the emailer appends the sending
-    address's signature at send time (keyed on the actual From)."""
+async def test_signature_is_stamped_from_the_picked_sender(state):
+    """The drafter writes no closing; the emailer stamps the sending address's
+    signature at send time (keyed on the actual From). It rides SEPARATELY —
+    the body stays unsigned so the provider can bold the signature block in the
+    HTML part (see test_mailjet / test_email_format)."""
     cap = BodyCapturingSender()
     state["pool"] = [{"sender_email": "a@d1.com", "sender_name": "A",
                       "signature": "Best,\nMadhav Gupta"}]
@@ -505,21 +510,23 @@ async def test_signature_is_appended_from_the_picked_sender(state):
 
     await emailer.run(cap)
 
-    assert cap.bodies == ["B\n\nBest,\nMadhav Gupta"]
+    assert cap.bodies == ["B"]                          # body untouched
+    assert cap.signatures == ["Best,\nMadhav Gupta"]    # signature alongside
 
 
 @pytest.mark.asyncio
 async def test_send_test_email_uses_the_test_address_and_signature():
     """The test send goes to the given inbox with the mailbox's signature
-    appended, through the normal send path — and touches no real contact
-    (no claim, no mark)."""
+    stamped (separately, like a real send — the provider composes the parts),
+    through the normal send path — and touches no real contact (no claim,
+    no mark)."""
     class Cap:
         name = "mailjet"
         def __init__(self):
             self.sent = []
 
         async def send(self, t):
-            self.sent.append((t.email, t.email_body, t.sender_email))
+            self.sent.append((t.email, t.email_body, t.signature, t.sender_email))
             return "test-ref"
 
     cap = Cap()
@@ -529,11 +536,11 @@ async def test_send_test_email_uses_the_test_address_and_signature():
         sender=cap)
 
     assert ref == "test-ref"
-    assert cap.sent == [("me@inbox.com", "Hi there\n\nBest,\nMadhav", "a@d1.com")]
+    assert cap.sent == [("me@inbox.com", "Hi there", "Best,\nMadhav", "a@d1.com")]
 
 
 @pytest.mark.asyncio
-async def test_no_signature_leaves_the_body_unchanged(state):
+async def test_no_signature_stamps_none(state):
     cap = BodyCapturingSender()
     state["pool"] = [{"sender_email": "a@d1.com", "sender_name": "A"}]  # no signature
     state["claims"] = [[target(1)]]
@@ -541,6 +548,7 @@ async def test_no_signature_leaves_the_body_unchanged(state):
     await emailer.run(cap)
 
     assert cap.bodies == ["B"]
+    assert cap.signatures == [None]
 
 
 # ---- business-hours send window ---------------------------------------
@@ -646,7 +654,7 @@ async def test_send_campaign_now_is_a_noop_without_mailjet(state):
 @pytest.mark.asyncio
 async def test_send_campaign_now_keeps_the_signature(state):
     """The override goes through the same _send_batch, so the picked sender's
-    signature is still appended."""
+    signature is still stamped."""
     cap = BodyCapturingSender()
     state["pool"] = [{"sender_email": "a@d1.com", "sender_name": "A",
                       "signature": "Best,\nMadhav Gupta"}]
@@ -654,7 +662,7 @@ async def test_send_campaign_now_keeps_the_signature(state):
 
     await emailer.send_campaign_now(7, cap)
 
-    assert cap.bodies == ["B\n\nBest,\nMadhav Gupta"]
+    assert cap.signatures == ["Best,\nMadhav Gupta"]
 
 
 @pytest.mark.asyncio

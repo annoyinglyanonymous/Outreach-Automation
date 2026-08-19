@@ -899,7 +899,10 @@ def test_test_send_rejects_a_bad_address(client, session_cookie, monkeypatch):
     assert r.headers["location"] == "/ui/campaigns/3?test=bad_address"
 
 
-def test_test_approve_releases_and_redirects(client, session_cookie, monkeypatch):
+def test_test_approve_releases_nudges_draft_and_redirects(client, session_cookie,
+                                                          calls, monkeypatch):
+    """Approving the test releases the campaign AND starts drafting right away
+    (drafting is gated on test approval, so the queue is waiting on this)."""
     seen = {}
 
     async def get_campaign(cid):
@@ -916,6 +919,7 @@ def test_test_approve_releases_and_redirects(client, session_cookie, monkeypatch
     assert r.status_code == 303
     assert r.headers["location"] == "/ui/campaigns/5?test=approved"
     assert seen["approved"] == 5
+    assert calls["nudges"] == ["draft"]     # drafting starts on release
 
 
 def test_send_now_sends_and_redirects_with_count(client, session_cookie, monkeypatch):

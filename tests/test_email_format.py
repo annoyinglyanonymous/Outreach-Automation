@@ -8,7 +8,7 @@ stays plain text — this only shapes the HTML alternative at send time.
 """
 from __future__ import annotations
 
-from app.email_format import anchor_to_text, render_html_body
+from app.email_format import anchor_to_text, join_signature, render_html_body
 
 
 def test_blank_lines_become_separate_paragraphs():
@@ -127,3 +127,47 @@ def test_anchor_to_text_flattens_to_text_and_url():
 def test_anchor_to_text_leaves_plain_text_untouched():
     assert anchor_to_text("no link here") == "no link here"
     assert anchor_to_text(None) is None
+
+
+# ---- signature (bold block in the HTML part; joined for the text part) ----
+
+
+def test_join_signature_appends_with_a_blank_line():
+    assert join_signature("Body.", "Best,\nAayush") == "Body.\n\nBest,\nAayush"
+
+
+def test_join_signature_is_a_noop_without_a_signature():
+    assert join_signature("Body.", None) == "Body."
+    assert join_signature("Body.", "   ") == "Body."
+
+
+def test_signature_renders_as_a_bold_block_with_line_breaks():
+    """The signature is its own final paragraph, WHOLE BLOCK bold
+    (operator-directed), newlines as <br> — visually set apart from the copy."""
+    html = render_html_body("Body para.",
+                            signature="Best,\nAayush Gupta\n+1 678 500 9991")
+    assert 'font-weight:bold' in html
+    sig_block = html[html.index("font-weight:bold"):]
+    assert "Best,<br>" in sig_block
+    assert "Aayush Gupta<br>" in sig_block
+    assert "+1 678 500 9991" in sig_block
+    # The body paragraph itself is NOT bold — only the signature block is.
+    body_part = html[:html.index("font-weight:bold")]
+    assert "Body para." in body_part
+
+
+def test_signature_is_escaped_not_markup():
+    """The signature is operator config but still escaped — a < in it must
+    never reach the recipient as live markup."""
+    html = render_html_body("Body", signature="Best <M&A>")
+    assert "Best &lt;M&amp;A&gt;" in html
+
+
+def test_no_signature_adds_no_bold_block():
+    html = render_html_body("Body")
+    assert "font-weight:bold" not in html
+
+
+def test_empty_body_renders_nothing_even_with_a_signature():
+    # No body -> no HTML part at all; a signature alone is never sent.
+    assert render_html_body("", signature="Best,\nA") == ""

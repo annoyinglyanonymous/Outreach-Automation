@@ -56,6 +56,9 @@ _WRAPPER = (
     'color:#222222;">{body}</div>'
 )
 _PARAGRAPH = '<p style="margin:0 0 16px;">{content}</p>'
+# The signature is its own block, whole-block bold (operator-directed), set
+# apart from the body copy. Inline-styled like everything else.
+_SIGNATURE = '<p style="margin:0 0 16px;font-weight:bold;">{content}</p>'
 _LINK = '<a href="{href}" style="color:#2563eb;text-decoration:underline;">{text}</a>'
 
 
@@ -81,6 +84,15 @@ def _linkify(escaped: str) -> str:
     return _LINK_RE.sub(repl, escaped)
 
 
+def join_signature(body: str, signature: str | None) -> str:
+    """Append the sending address's fixed signature block to the drafted body,
+    for the text/plain part. The drafter writes no closing, so this is the
+    message's only sign-off; a no-op when the sender has no signature set."""
+    if not signature or not signature.strip():
+        return body
+    return body.rstrip() + "\n\n" + signature.strip()
+
+
 def anchor_to_text(text: str | None) -> str | None:
     """Flatten any safe inline <a> the drafter wrote to plain ``text (url)`` —
     for the text/plain part and any read-only display, where a raw tag would
@@ -91,11 +103,15 @@ def anchor_to_text(text: str | None) -> str | None:
         lambda m: f"{m.group('text')} ({m.group('href')})", text)
 
 
-def render_html_body(text: str | None) -> str:
+def render_html_body(text: str | None, signature: str | None = None) -> str:
     """A plain-text body -> a minimal inline-styled HTML document, or ``""``
     when the body is empty (the caller then omits the HTML part rather than
     sending an empty one). A single strict https <a> the drafter embedded is
-    preserved (see _SAFE_ANCHOR_RE); all other content is still escaped."""
+    preserved (see _SAFE_ANCHOR_RE); all other content is still escaped.
+
+    ``signature`` (the picked sender's block) is rendered as its own final
+    BOLD paragraph — escaped, single newlines as <br>, no anchor passthrough:
+    it is operator config, not drafter copy."""
     if not text or not text.strip():
         return ""
     normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
@@ -124,6 +140,9 @@ def render_html_body(text: str | None) -> str:
         paragraphs.append(_PARAGRAPH.format(content=linked.replace("\n", "<br>\n")))
     if not paragraphs:
         return ""
+    if signature and signature.strip():
+        sig = html.escape(signature.strip(), quote=False).replace("\n", "<br>\n")
+        paragraphs.append(_SIGNATURE.format(content=sig))
     out = _WRAPPER.format(body="".join(paragraphs))
     for i, (href, atext) in enumerate(anchors):
         out = out.replace(

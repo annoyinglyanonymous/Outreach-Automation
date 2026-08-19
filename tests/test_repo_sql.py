@@ -193,6 +193,15 @@ def test_email_claim_is_gated_on_test_approval():
     assert "g.test_status = 'approved'" in repo.APPROVED_UNSENT_SQL
 
 
+def test_draft_claim_is_gated_on_test_approval():
+    """The gate sits on the FIRST money stage too: no LLM drafting until the
+    test is approved — uploaded contacts wait at ready_to_draft. The lock stays
+    on contacts only (FOR UPDATE OF c), matching the email claim's shape."""
+    sql = repo.CLAIM_DRAFT_SQL
+    assert "cg.test_status = 'approved'" in sql
+    assert "FOR UPDATE OF c SKIP LOCKED" in sql
+
+
 def test_unsendable_report_names_a_test_gated_campaign():
     """A campaign held for test approval must be surfaced (not silently
     missing), and its gate is part of the report's sendable predicate."""

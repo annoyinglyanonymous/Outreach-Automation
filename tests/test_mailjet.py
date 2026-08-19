@@ -101,6 +101,28 @@ async def test_send_includes_a_formatted_html_part_alongside_the_text():
 
 
 @pytest.mark.asyncio
+async def test_send_composes_the_signature_per_part():
+    """A target carrying a signature sends it appended as plain text in the
+    text part and as a BOLD block in the HTML part — the reason it rides
+    separately on the target instead of pre-merged into the body."""
+    seen = {}
+
+    def handler(request):
+        seen["msg"] = json.loads(request.content)["Messages"][0]
+        return httpx.Response(200, json=OK_BODY)
+
+    await sender_with(handler).send(dataclasses.replace(
+        TARGET, email_body="Hi Jane,\n\nWorth a look?",
+        signature="Best,\nAayush Gupta"))
+
+    msg = seen["msg"]
+    assert msg["TextPart"] == "Hi Jane,\n\nWorth a look?\n\nBest,\nAayush Gupta"
+    html = msg["HTMLPart"]
+    assert "font-weight:bold" in html
+    assert "Best,<br>" in html and "Aayush Gupta" in html
+
+
+@pytest.mark.asyncio
 async def test_send_omits_html_part_for_an_empty_body():
     """An empty body means no HTML alternative to add — TextPart only, never
     an empty HTMLPart."""

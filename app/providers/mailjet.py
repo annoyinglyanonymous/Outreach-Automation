@@ -30,7 +30,7 @@ import logging
 import httpx
 
 from ..config import config
-from ..email_format import anchor_to_text, render_html_body
+from ..email_format import anchor_to_text, join_signature, render_html_body
 from .base import ProviderError, SendRejected, SendUncertain
 
 log = logging.getLogger(__name__)
@@ -117,6 +117,10 @@ class MailjetSender:
         from_block: dict = {"Email": target.sender_email}
         if target.sender_name:
             from_block["Name"] = target.sender_name
+        # The signature (picked with the From) is composed here, per part: the
+        # text part appends it as plain text, the HTML part renders it as its
+        # own bold block — which is why it rides separately on the target
+        # instead of being pre-merged into the body.
         message = {
             "From": from_block,
             "To": [{"Email": target.email}],
@@ -125,13 +129,15 @@ class MailjetSender:
             # (any inline <a> the drafter wrote flattened to "text (url)" so it
             # reads cleanly), and a formatted HTML rendering of the same copy so
             # it lands as a real email — paragraphs, line breaks, clickable
-            # links, and that anchor preserved (see email_format).
-            "TextPart": anchor_to_text(target.email_body),
+            # links, that anchor preserved, the signature bold (see email_format).
+            "TextPart": anchor_to_text(
+                join_signature(target.email_body, target.signature)),
             # A correlation handle for the delivery webhook, NOT a dedupe
             # key — Mailjet has none (see module docstring).
             "CustomID": f"outreach-contact-{target.id}",
         }
-        html_body = render_html_body(target.email_body)
+        html_body = render_html_body(target.email_body,
+                                     signature=target.signature)
         if html_body:
             message["HTMLPart"] = html_body
         payload = {"Messages": [message]}

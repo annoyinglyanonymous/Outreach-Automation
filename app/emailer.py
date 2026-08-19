@@ -131,15 +131,6 @@ def within_send_window(now: datetime) -> bool:
     return config.SEND_WINDOW_START_HOUR <= now.hour < config.SEND_WINDOW_END_HOUR
 
 
-def _with_signature(body: str, signature: str | None) -> str:
-    """Append the sending address's fixed signature block to the drafted body.
-    The drafter writes no closing, so this is the message's only sign-off. A
-    no-op when the sender has no signature set (nothing to append)."""
-    if not signature or not signature.strip():
-        return body
-    return body.rstrip() + "\n\n" + signature.strip()
-
-
 async def _send_batch(
     targets: list["repo.EmailTarget"],
     sender: EmailSender,
@@ -171,13 +162,16 @@ async def _send_batch(
                     [t.id for t in targets[index:]]
                 )
                 return False
-        # Stamp the From and append that sending address's fixed signature
-        # (the drafter writes no closing). Keyed on the actual From, so a
-        # rotating campaign signs each mail as whoever it went out from.
+        # Stamp the From and that sending address's fixed signature (the
+        # drafter writes no closing). Keyed on the actual From, so a rotating
+        # campaign signs each mail as whoever it went out from. The signature
+        # rides SEPARATELY from the body: the provider composes the text part
+        # (body + signature) and renders the HTML part with a bold signature
+        # block (see providers/mailjet.py + email_format).
         target = replace(
             target, sender_email=picked["sender_email"],
             sender_name=picked["sender_name"],
-            email_body=_with_signature(target.email_body, picked.get("signature")),
+            signature=picked.get("signature"),
         )
 
         try:
@@ -355,6 +349,7 @@ async def send_test_email(*, to_address: str, subject: str, body: str,
         raise ProviderError("Mailjet is not configured")
     target = repo.EmailTarget(
         id=0, email=to_address, first_name="Test", last_name=None, company=None,
-        email_subject=subject, email_body=_with_signature(body, signature),
-        sender_email=sender_email, sender_name=sender_name)
+        email_subject=subject, email_body=body,
+        sender_email=sender_email, sender_name=sender_name,
+        signature=signature)
     return await sender.send(target)

@@ -171,8 +171,9 @@
     {% else %}
     <span class="badge paused">Pending test</span>
     {% endif %}
-    No real emails send from this campaign until a test is approved. Send a copy to an inbox you
-    control (a real draft with the sending mailbox's signature — no real contact is touched),
+    Drafting and sending start only after you approve the test: uploaded contacts wait
+    undrafted (no LLM spend) until then. Send a copy to an inbox you control (a real
+    sample draft with the sending mailbox's signature — no real contact is touched),
     eyeball it, then release.
   </p>
   <form method="post" action="/ui/campaigns/{{ campaign.id }}/test-send"

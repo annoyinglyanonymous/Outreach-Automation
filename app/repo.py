@@ -43,6 +43,11 @@ class EmailTarget:
     # an id pins every send for this campaign to that one sender (still
     # capped) via claim_pinned_sender instead of claim_rotating_sender.
     pinned_sender_id: int | None = None
+    # The picked sender's signature block, stamped alongside the From at send
+    # time — carried SEPARATELY from email_body so the HTML part can style it
+    # (bold block) while the text part appends it as plain text. The stored
+    # draft stays unsigned.
+    signature: str | None = None
 
 
 @dataclass(slots=True)
@@ -406,12 +411,18 @@ async def reset_stale_scrape_claims() -> int:
 
 CLAIM_DRAFT_SQL = """
 WITH claimed AS (
-    SELECT id, campaign_id
-      FROM contacts
-     WHERE linkedin_status = 'ready_to_draft'
-     ORDER BY created_at
+    SELECT c.id, c.campaign_id
+      FROM contacts c
+      JOIN campaigns cg ON cg.id = c.campaign_id
+     WHERE c.linkedin_status = 'ready_to_draft'
+       -- Test gate (migration 017), moved to the FIRST money stage: no LLM
+       -- drafting until the campaign's test email is approved. Contacts wait
+       -- at ready_to_draft; Approve & release nudges this stage. The send
+       -- claim keeps its own gate as defense in depth.
+       AND cg.test_status = 'approved'
+     ORDER BY c.created_at
      LIMIT $1
-     FOR UPDATE SKIP LOCKED
+     FOR UPDATE OF c SKIP LOCKED
 )
 UPDATE contacts c
    SET linkedin_status = 'drafting'

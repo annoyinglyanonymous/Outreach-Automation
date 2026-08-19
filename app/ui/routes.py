@@ -509,7 +509,8 @@ _INGEST_FLASHES = {
 }
 _TEST_FLASHES = {
     "sent": ("ok", "Test email sent — check that inbox, then Approve & release below."),
-    "approved": ("ok", "Campaign released — approved emails will now send."),
+    "approved": ("ok", "Campaign released — drafting begins now; approved emails "
+                       "will send."),
     "bad_address": ("error", "Enter a valid email address for the test."),
     "no_sender": ("error", "No active sending mailbox for the test — activate one on "
                            "the Senders page (or the pinned mailbox is paused)."),
@@ -921,13 +922,16 @@ async def campaign_test_send(request: Request, campaign_id: int,
 @router.post("/campaigns/{campaign_id}/test-approve")
 async def campaign_test_approve(request: Request, campaign_id: int,
                                 session: Session = Depends(require_session)):
-    """Release the campaign — real emails may now send (the CLAIM_EMAIL_SQL
-    test gate). Idempotent; a missing campaign 404s."""
+    """Release the campaign: drafting (gated in CLAIM_DRAFT_SQL) starts now —
+    nudged so it begins immediately, not on the next tick — and approved drafts
+    may send (CLAIM_EMAIL_SQL keeps its own gate as defense in depth).
+    Idempotent; a missing campaign 404s."""
     check_origin(request)
     campaign = await repo.get_campaign(campaign_id)
     if campaign is None:
         raise HTTPException(status_code=404)
     await repo.approve_campaign_test(campaign_id)
+    runs.nudge("draft")
     return RedirectResponse(f"/ui/campaigns/{campaign_id}?test=approved",
                             status_code=303)
 
