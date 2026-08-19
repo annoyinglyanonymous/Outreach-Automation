@@ -180,6 +180,11 @@ def test_the_scaffold_carries_the_load_bearing_rules():
     assert "separated by blank" in s
     assert "anchor tag" in s.lower()
     assert "appended" in s and "signature" in s.lower()
+    # Anti-regurgitation (a live test email echoed the prompt's beat-2 wording
+    # and its example link sentence nearly verbatim, out of order).
+    assert "Never copy" in s
+    assert "illustrate format only" in s
+    assert "that order" in s
 
 
 def test_default_prompt_is_the_operators_verbatim_text():

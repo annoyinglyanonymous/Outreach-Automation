@@ -149,6 +149,11 @@ DEFAULT_SYSTEM_PROMPT = (
 # belongs to the objective.
 PROMPT_SCAFFOLD = (
     "MECHANICAL RULES (these override anything above):\n"
+    "- Write original copy. Never copy or lightly rephrase sentences from "
+    "these instructions into the email — any example sentences above "
+    "illustrate format only, and their wording must not appear in the email.\n"
+    "- If the instructions give a numbered structure, follow it in exactly "
+    "that order, with each element appearing once.\n"
     "- Personalize only from the supplied prospect data. Never invent a "
     "detail you were not given, and never mention how the data was obtained.\n"
     "- The prospect data may include internal list fields (tiers, scores, "
