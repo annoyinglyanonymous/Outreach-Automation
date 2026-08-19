@@ -645,15 +645,18 @@ def _brief_from_form(form) -> dict:
         # So the preview picks the CSV vs LinkedIn drafting path (drafting
         # .preview_draft reads this from the brief).
         "enrichment_mode": _enrichment_mode(form.get("enrichment_mode")),
+        # The on-screen (possibly unsaved) drafting prompt, so Preview shows
+        # what the objective would produce before it is saved.
+        "objective": g("objective"),
     }
 
 
 def _brief_from_campaign(campaign: dict) -> dict:
     """The aliased brief dict drafting.preview_draft expects, read from a saved
-    campaign row (offer_description -> offer, sender_name -> sender). Used by the
-    test-send to draft a real sample. The drafting prompt is fixed now, so the
-    brief only feeds the no-profile fallback template + the csv/linkedin path
-    choice; the personalised copy is unaffected by it."""
+    campaign row (offer_description -> offer, sender_name -> sender). Used by
+    the test-send to draft a real sample. The stored `objective` is the
+    campaign's drafting prompt (migration 018); the rest feeds the no-profile
+    fallback template + the csv/linkedin path choice."""
     def g(name: str):
         return campaign.get(name) or None
     return {
@@ -666,6 +669,9 @@ def _brief_from_campaign(campaign: dict) -> dict:
         "fallback_email_subject": g("fallback_email_subject"),
         "fallback_email_body": g("fallback_email_body"),
         "enrichment_mode": campaign.get("enrichment_mode") or "linkedin",
+        # The stored drafting prompt — so the test email is drafted with the
+        # same objective+scaffold prompt a real send would use.
+        "objective": g("objective"),
     }
 
 
@@ -740,6 +746,10 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
     fields.update(brief)
     fields.update({
         "name": name,
+        # Stored verbatim (migration 018): the objective doubles as the
+        # campaign's drafting prompt (build_prompts wraps it with the fixed
+        # mechanical scaffold), editable later on the campaign page.
+        "objective": objective,
         "status": "active",
         "consent_status": "cold",
         "channel_policy": "email_only",

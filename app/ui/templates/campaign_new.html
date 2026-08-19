@@ -18,8 +18,10 @@
     <div class="col">
       <label>Name <input name="name" value="{{ form.name or '' }}" required></label>
       <label>Objective
-        <span class="sub">One paragraph: what you're offering, to whom, and why now.
-        It is expanded into the full campaign brief — editable after creation.</span>
+        <span class="sub">What you're offering, to whom, and how the email should read —
+        this becomes the campaign's <strong>drafting prompt</strong> (formatting and signature
+        rules are enforced automatically) and is expanded into the brief. Editable after
+        creation; iterate with the Preview and test email.</span>
         <textarea name="objective" rows="6" required>{{ form.objective or '' }}</textarea></label>
     </div>
     <div class="col">

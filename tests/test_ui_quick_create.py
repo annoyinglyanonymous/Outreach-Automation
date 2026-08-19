@@ -196,6 +196,13 @@ def test_create_linkedin_mode_still_uses_n8n_and_nudges_enrich(client, session_c
     assert state["nudges"] == ["enrich"]
 
 
+def test_the_objective_is_stored_as_the_drafting_prompt(client, session_cookie, state):
+    """The objective is persisted verbatim (migration 018) — it doubles as the
+    campaign's drafting prompt, not just the one-shot brief-expansion input."""
+    create(client, session_cookie)
+    assert state["created"]["objective"] == "Sell the platform"
+
+
 def test_new_campaign_starts_gated_pending_test(client, session_cookie, state):
     """Every new campaign is gated (migration 017) — no real emails send until
     a test is approved."""

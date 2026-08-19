@@ -193,6 +193,14 @@ def test_email_claim_is_gated_on_test_approval():
     assert "g.test_status = 'approved'" in repo.APPROVED_UNSENT_SQL
 
 
+def test_draft_claim_carries_the_stored_objective():
+    """The campaign's stored objective is its drafting prompt (migration 018),
+    so the claim must hand it to the drafter, and the edit form must own it."""
+    assert "'objective',              g.objective" in repo.CLAIM_DRAFT_SQL
+    assert "objective" in repo.CAMPAIGN_FIELDS
+    assert "objective" in repo.CAMPAIGN_UPDATE_FIELDS   # edit-form owned
+
+
 def test_draft_claim_is_gated_on_test_approval():
     """The gate sits on the FIRST money stage too: no LLM drafting until the
     test is approved — uploaded contacts wait at ready_to_draft. The lock stays

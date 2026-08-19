@@ -31,6 +31,16 @@
   <div class="columns">
     <div class="col">
       <label>Name <input name="name" value="{{ campaign.name if campaign else '' }}" required></label>
+      {# The stored objective doubles as this campaign's DRAFTING PROMPT
+         (migration 018): build_prompts wraps it with the fixed mechanical
+         scaffold (blank-line paragraphs, anchor-tag links, no invented
+         details, no sign-off). Blank = the built-in default prompt. #}
+      <label>Objective — drafting instructions
+        <span class="sub">Used as this campaign's drafting prompt: goal, audience, structure,
+        tone, link — write it like instructions to a copywriter. Formatting/signature rules are
+        enforced automatically. Leave blank to use the built-in default prompt. Iterate with
+        Preview or a test email.</span>
+        <textarea name="objective" rows="8">{{ (campaign.objective or '') if campaign else '' }}</textarea></label>
       <label>Status <input name="status" value="{{ campaign.status if campaign else 'active' }}"></label>
       {# A select, not free text: the schema's CHECK constrains this column
          and a typo would fail a live create. It is a compliance/record

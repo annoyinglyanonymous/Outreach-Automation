@@ -144,6 +144,49 @@ def test_system_prompt_demands_blank_line_paragraphs():
     assert "one paragraph" in system              # "never ... as one paragraph"
 
 
+def test_a_stored_objective_becomes_the_prompt_wrapped_in_the_scaffold():
+    """A campaign's stored objective IS its drafting prompt (migration 018):
+    the system prompt starts with the objective verbatim and ends with the
+    fixed mechanical scaffold — the default calculator prompt is not used."""
+    obj = "Invite CFOs at logistics startups to a freight-audit webinar."
+    system, _ = drafting.build_prompts(
+        target(profile=PROFILE, campaign={**CAMPAIGN, "objective": obj}))
+    assert system.startswith(obj)
+    assert "MECHANICAL RULES" in system
+    assert "appended automatically" in system        # no-sign-off rule rides along
+    assert "Agency Value Calculator" not in system   # default prompt NOT used
+
+
+def test_a_blank_objective_falls_back_to_the_default_prompt():
+    """NULL/empty objective (every pre-018 campaign) keeps today's behaviour:
+    the built-in calculator prompt, no scaffold."""
+    for empty in (None, "", "   "):
+        system, _ = drafting.build_prompts(
+            target(profile=PROFILE, campaign={**CAMPAIGN, "objective": empty}))
+        assert system == drafting.DEFAULT_SYSTEM_PROMPT
+
+
+def test_the_scaffold_carries_the_four_load_bearing_rules():
+    """Whatever the objective says, the scaffold enforces the mechanics the
+    pipeline depends on: data-only personalization, blank-line paragraphs,
+    anchor-tag-only links, and no sign-off (the signature is appended)."""
+    s = drafting.PROMPT_SCAFFOLD
+    assert "Never invent" in s
+    assert "separated by blank" in s
+    assert "anchor tag" in s.lower()
+    assert "appended" in s and "signature" in s.lower()
+
+
+def test_csv_prompts_use_the_objective_too():
+    """build_csv_prompts shares build_prompts' system, so a CSV campaign's
+    stored objective drives its copy the same way."""
+    obj = "Pitch the freight-audit webinar."
+    system, _ = drafting.build_csv_prompts(
+        target(profile=None, campaign={**CSV_CAMPAIGN, "objective": obj},
+               extra_data=EXTRA))
+    assert system.startswith(obj)
+
+
 def test_build_prompts_truncates_huge_profiles(monkeypatch):
     monkeypatch.setattr(config, "DRAFT_PROFILE_CHAR_LIMIT", 200)
     _, user = drafting.build_prompts(target(profile={"blob": "x" * 10_000}))

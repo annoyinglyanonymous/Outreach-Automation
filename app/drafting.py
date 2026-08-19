@@ -90,55 +90,91 @@ def clamp_note(note: str | None) -> str | None:
     return cut.rstrip(" ,;:.") + "."
 
 
+# The built-in default prompt: the Agency Value Calculator outreach. Used
+# whenever a campaign has no stored objective (every pre-018 campaign), so
+# existing behaviour is unchanged until an operator writes one. The one
+# load-bearing mechanic is LINK FORMATTING: the model emits a real
+# <a href="https://…"> anchor inline, which email_format.render_html_body
+# passes through un-escaped (a single strict https anchor only) and the
+# plain-text part strips to "text (url)".
+DEFAULT_SYSTEM_PROMPT = (
+    "You write short, personalized first-touch cold emails on the sender's "
+    "behalf to independent insurance agency owners and principals. "
+    "Personalize only from the supplied prospect data, and never invent a "
+    "detail you were not given or mention how the data was obtained.\n\n"
+    "Write a short cold email between 60 and 90 words. Shorter is better.\n\n"
+    "Structure:\n"
+    "1. One or two sentences of personalization based on the supplied data, "
+    "tied naturally to agency value, book composition, retention, or "
+    "ownership.\n"
+    "2. One or two sentences pitching the Agency Value Calculator: it gives "
+    "an estimated current-market valuation in about 60 seconds, no sales "
+    "call required.\n"
+    "3. One short closing line inviting a reply if the result raises "
+    "questions.\n\n"
+    "Format the body as two or three short paragraphs separated by blank "
+    "lines — the personalization, the calculator pitch with the link, and "
+    "the closing line. Never write the whole email as one paragraph.\n\n"
+    "Do not explain the full list of valuation factors. You may mention at "
+    "most one factor (such as retention or carrier mix) if it fits the "
+    "personalization naturally.\n\n"
+    "Use the recipient's first name.\n\n"
+    "Create one subject line with no more than 45 characters.\n\n"
+    "LINK FORMATTING\n\n"
+    "The email body will be sent as HTML. Include the calculator link "
+    "exactly once, embedded as a hyperlink inside a natural sentence using "
+    "an HTML anchor tag, like this:\n\n"
+    "If you're curious what your book is worth in today's market, "
+    "<a href=\"https://renegadeinsurance.com/agency-value-calculator/"
+    "?utm_source=automation\">take a quick look here</a>.\n\n"
+    "Never paste the raw URL as visible text. Never use markdown link "
+    "syntax like [text](url). Use only the anchor tag format shown above. "
+    "Vary the anchor text naturally between emails (examples: \"check your "
+    "agency's current value\", \"run the 60-second estimate\", \"see where "
+    "your agency stands\").\n\n"
+    "Do not use em dashes.\n"
+    "Do not use excessive punctuation.\n"
+    "Do not include bullet points.\n"
+    "Do not include any markdown formatting.\n"
+    "Do not generate the sender's signature. The signature will be added "
+    "separately by the automation."
+)
+
+# The fixed mechanical scaffold appended to a campaign's stored objective.
+# These four rules are load-bearing — the pipeline breaks without them — so
+# they hold no matter what the objective says: paragraphs feed the HTML
+# renderer, only a strict https anchor survives it, invented details are the
+# one unforgivable content bug, and the signature is appended at send time
+# (anything the model adds would double-sign). Everything else about the
+# email — audience, product, structure, tone, links — is the objective's.
+PROMPT_SCAFFOLD = (
+    "MECHANICAL RULES (these override anything above):\n"
+    "- Personalize only from the supplied prospect data. Never invent a "
+    "detail you were not given, and never mention how the data was obtained.\n"
+    "- Format the body as two or three short paragraphs separated by blank "
+    "lines. Never write the whole email as one paragraph.\n"
+    "- Any link must appear exactly once, embedded in a natural sentence as "
+    "an HTML anchor tag: <a href=\"https://...\">anchor text</a>. Never paste "
+    "a raw URL as visible text, and never use markdown link syntax.\n"
+    "- Do not include any markdown formatting.\n"
+    "- Write one subject line as well.\n"
+    "- Do not write any closing, sign-off, or signature — no name, title, "
+    "company, or contact details at the end. The signature is appended "
+    "automatically by the automation."
+)
+
+
 def build_prompts(target: "repo.DraftTarget") -> tuple[str, str]:
-    # Fixed campaign prompt: the Agency Value Calculator outreach. The audience,
-    # product and link are intentionally baked in here (operator-directed) — the
-    # campaign brief no longer steers the copy. The one load-bearing mechanic is
-    # LINK FORMATTING: the model emits a real <a href="https://…"> anchor inline,
-    # which email_format.render_html_body passes through un-escaped (a single
-    # strict https anchor only) and the plain-text part strips to "text (url)".
-    system = (
-        "You write short, personalized first-touch cold emails on the sender's "
-        "behalf to independent insurance agency owners and principals. "
-        "Personalize only from the supplied prospect data, and never invent a "
-        "detail you were not given or mention how the data was obtained.\n\n"
-        "Write a short cold email between 60 and 90 words. Shorter is better.\n\n"
-        "Structure:\n"
-        "1. One or two sentences of personalization based on the supplied data, "
-        "tied naturally to agency value, book composition, retention, or "
-        "ownership.\n"
-        "2. One or two sentences pitching the Agency Value Calculator: it gives "
-        "an estimated current-market valuation in about 60 seconds, no sales "
-        "call required.\n"
-        "3. One short closing line inviting a reply if the result raises "
-        "questions.\n\n"
-        "Format the body as two or three short paragraphs separated by blank "
-        "lines — the personalization, the calculator pitch with the link, and "
-        "the closing line. Never write the whole email as one paragraph.\n\n"
-        "Do not explain the full list of valuation factors. You may mention at "
-        "most one factor (such as retention or carrier mix) if it fits the "
-        "personalization naturally.\n\n"
-        "Use the recipient's first name.\n\n"
-        "Create one subject line with no more than 45 characters.\n\n"
-        "LINK FORMATTING\n\n"
-        "The email body will be sent as HTML. Include the calculator link "
-        "exactly once, embedded as a hyperlink inside a natural sentence using "
-        "an HTML anchor tag, like this:\n\n"
-        "If you're curious what your book is worth in today's market, "
-        "<a href=\"https://renegadeinsurance.com/agency-value-calculator/"
-        "?utm_source=automation\">take a quick look here</a>.\n\n"
-        "Never paste the raw URL as visible text. Never use markdown link "
-        "syntax like [text](url). Use only the anchor tag format shown above. "
-        "Vary the anchor text naturally between emails (examples: \"check your "
-        "agency's current value\", \"run the 60-second estimate\", \"see where "
-        "your agency stands\").\n\n"
-        "Do not use em dashes.\n"
-        "Do not use excessive punctuation.\n"
-        "Do not include bullet points.\n"
-        "Do not include any markdown formatting.\n"
-        "Do not generate the sender's signature. The signature will be added "
-        "separately by the automation."
-    )
+    # The campaign's stored objective IS its drafting prompt (migration 018),
+    # wrapped with the fixed mechanical scaffold; a campaign without one gets
+    # the built-in default. Editable on the campaign page, so prompt iteration
+    # is edit -> test email -> release, with no code change per campaign.
+    campaign = target.campaign or {}
+    objective = str(campaign.get("objective") or "").strip()
+    if objective:
+        system = objective + "\n\n" + PROMPT_SCAFFOLD
+    else:
+        system = DEFAULT_SYSTEM_PROMPT
 
     profile = json.dumps(target.profile_data or {}, ensure_ascii=False)
     if len(profile) > config.DRAFT_PROFILE_CHAR_LIMIT:

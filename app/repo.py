@@ -440,7 +440,8 @@ RETURNING c.id, c.email, c.first_name, c.last_name, c.company, c.title,
               'audience_rationale',     g.audience_rationale,
               'fallback_email_subject', g.fallback_email_subject,
               'fallback_email_body',    g.fallback_email_body,
-              'enrichment_mode',        g.enrichment_mode
+              'enrichment_mode',        g.enrichment_mode,
+              'objective',              g.objective
           ) AS campaign;
 """
 
@@ -1433,6 +1434,10 @@ CAMPAIGN_FIELDS = (
     # 'approved'; only 'approved' lets real emails send (CLAIM_EMAIL_SQL). Owned
     # by the test-send/approve actions, NOT the edit form — see the exclusions.
     "test_status",
+    # migration 018: the operator's objective, STORED as the campaign's
+    # drafting instructions (build_prompts wraps it with the fixed mechanical
+    # scaffold). NULL/empty = the built-in default prompt. Edit form owns it.
+    "objective",
 )
 
 # Everything the edit form owns — i.e. CAMPAIGN_FIELDS minus the columns the
