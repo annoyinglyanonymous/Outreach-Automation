@@ -92,12 +92,26 @@ async def sync_pool(sender: EmailSender | None = None) -> dict:
     except ProviderError as exc:
         log.warning("sender pool sync skipped: %s", exc)
         return {"inserted": 0, "deactivated": 0, "error": str(exc)}
+    # Only allowlisted addresses may rotate: drop any other verified address
+    # so it never enrols. Since the sync pauses active rows NOT in the incoming
+    # list, this also auto-pauses any non-approved row already in the pool
+    # (see config.SENDER_ALLOWED_ADDRESSES; empty = no restriction).
+    records = [r for r in records if config.sender_allowed(r.get("email"))]
     result = await repo.sync_senders_from_mailjet(
         records, config.MAILJET_SENDER_DAILY_CAP)
     if result["inserted"] or result["deactivated"]:
         log.info("sender pool synced from Mailjet: +%d enrolled, %d paused (unverified)",
                  result["inserted"], result["deactivated"])
     return {**result, "error": None}
+
+
+def _with_signature(body: str, signature: str | None) -> str:
+    """Append the sending address's fixed signature block to the drafted body.
+    The drafter writes no closing, so this is the message's only sign-off. A
+    no-op when the sender has no signature set (nothing to append)."""
+    if not signature or not signature.strip():
+        return body
+    return body.rstrip() + "\n\n" + signature.strip()
 
 
 async def _send_batch(
@@ -131,8 +145,14 @@ async def _send_batch(
                     [t.id for t in targets[index:]]
                 )
                 return False
-        target = replace(target, sender_email=picked["sender_email"],
-                         sender_name=picked["sender_name"])
+        # Stamp the From and append that sending address's fixed signature
+        # (the drafter writes no closing). Keyed on the actual From, so a
+        # rotating campaign signs each mail as whoever it went out from.
+        target = replace(
+            target, sender_email=picked["sender_email"],
+            sender_name=picked["sender_name"],
+            email_body=_with_signature(target.email_body, picked.get("signature")),
+        )
 
         try:
             ref = await sender.send(target)

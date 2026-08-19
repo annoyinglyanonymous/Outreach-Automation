@@ -119,6 +119,13 @@ def test_clamp_note_passes_short_notes_through():
     assert drafting.clamp_note(None) is None
 
 
+def test_system_prompt_forbids_a_closing():
+    """The signature is appended at send time, so the model must NOT write its
+    own closing/sign-off (else the email double-signs)."""
+    system, _ = drafting.build_prompts(target(profile=PROFILE))
+    assert "appended automatically" in system.lower()
+
+
 def test_build_prompts_truncates_huge_profiles(monkeypatch):
     monkeypatch.setattr(config, "DRAFT_PROFILE_CHAR_LIMIT", 200)
     _, user = drafting.build_prompts(target(profile={"blob": "x" * 10_000}))

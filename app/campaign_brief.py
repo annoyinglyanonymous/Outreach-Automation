@@ -24,14 +24,15 @@ EXPANSION_FIELDS = (
 # the pipeline; the LLM may return empty strings for the style fields.
 REQUIRED_FIELDS = ("offer_description", "fallback_email_subject", "fallback_email_body")
 
-# Merge fields must be ones drafting.merge_fields() actually provides —
-# {{sender}} resolves to the campaign's sender_name at send time.
+# Merge fields must be ones drafting.merge_fields() actually provides. No
+# sign-off / {{sender}} line: the sending address's signature is appended
+# automatically at send time (emailer._with_signature), so a closing here
+# would double up.
 GENERIC_FALLBACK_SUBJECT = "Quick question for {{company}}"
 GENERIC_FALLBACK_BODY = (
     "Hi {{first_name}},\n\n"
     "I work with independent insurance agencies and thought {{company}} "
-    "might be a fit for what we do. Worth a short call to find out?\n\n"
-    "{{sender}}"
+    "might be a fit for what we do. Worth a short call to find out?"
 )
 
 SYSTEM_PROMPT = (
@@ -41,7 +42,9 @@ SYSTEM_PROMPT = (
     "The fallback email is sent verbatim (after merge-field substitution) "
     "to contacts we could not research individually, so it must be short, "
     "plain and human — no hype, no placeholders other than the merge "
-    "fields {{first_name}}, {{company}} and {{sender}}.\n\n"
+    "fields {{first_name}} and {{company}}. Do NOT include a closing, "
+    "sign-off, or signature — end at the call to action; a signature is "
+    "appended automatically.\n\n"
     "Respond with a single JSON object of exactly this form: "
     '{"offer_description": string, "cta": string, "tone": string, '
     '"audience_rationale": string, "fallback_email_subject": string, '

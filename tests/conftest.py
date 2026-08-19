@@ -89,6 +89,10 @@ _CONFIG_DEFAULTS = {
     "CSV_ONLY_MAX_ROWS": 20_000,
     "CSV_ONLY_MAX_BYTES": 20_000_000,
     "CSV_INSERT_CHUNK": 500,
+    # Unrestricted in tests so the sender/provider/emailer suites (which use
+    # arbitrary addresses) aren't coupled to the real allowlist; tests that
+    # exercise the restriction patch type(config).SENDER_ALLOWED_ADDRESSES.
+    "SENDER_ALLOWED_ADDRESSES": (),
     "API_KEY": "",
     "DATABASE_URL": "",
 }

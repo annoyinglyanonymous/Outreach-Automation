@@ -1400,7 +1400,8 @@ async def delete_campaign(campaign_id: int) -> bool:
 # The identity + policy fields the admin UI creates/edits. Runtime state
 # (sent_today, day, last_used_at) is NOT here — it is written only by the
 # atomic pick/release, never a form.
-MAILJET_SENDER_FIELDS = ("sender_email", "sender_name", "active", "daily_cap")
+MAILJET_SENDER_FIELDS = ("sender_email", "sender_name", "active", "daily_cap",
+                         "signature")
 
 CREATE_SENDER_SQL = f"""
 INSERT INTO mailjet_senders ({", ".join(MAILJET_SENDER_FIELDS)})
@@ -1420,7 +1421,7 @@ RETURNING id;
 LIST_SENDERS_SQL = """
 SELECT id, sender_email, sender_name, active, daily_cap,
        CASE WHEN day < current_date THEN 0 ELSE sent_today END AS sent_today,
-       last_used_at, created_at
+       signature, last_used_at, created_at
   FROM mailjet_senders
  ORDER BY sender_email;
 """
@@ -1551,7 +1552,7 @@ UPDATE mailjet_senders m
        last_used_at = now()
   FROM picked
  WHERE m.id = picked.id
-RETURNING m.sender_email, m.sender_name;
+RETURNING m.sender_email, m.sender_name, m.signature;
 """
 
 
@@ -1559,7 +1560,8 @@ async def claim_rotating_sender() -> dict | None:
     row = await pool().fetchrow(CLAIM_ROTATING_SENDER_SQL)
     if row is None:
         return None
-    return {"sender_email": row["sender_email"], "sender_name": row["sender_name"]}
+    return {"sender_email": row["sender_email"], "sender_name": row["sender_name"],
+            "signature": row["signature"]}
 
 
 # The single-mailbox counterpart to claim_rotating_sender, for a campaign
@@ -1586,7 +1588,7 @@ UPDATE mailjet_senders m
        last_used_at = now()
   FROM picked
  WHERE m.id = picked.id
-RETURNING m.sender_email, m.sender_name;
+RETURNING m.sender_email, m.sender_name, m.signature;
 """
 
 
@@ -1594,7 +1596,8 @@ async def claim_pinned_sender(sender_id: int) -> dict | None:
     row = await pool().fetchrow(CLAIM_PINNED_SENDER_SQL, sender_id)
     if row is None:
         return None
-    return {"sender_email": row["sender_email"], "sender_name": row["sender_name"]}
+    return {"sender_email": row["sender_email"], "sender_name": row["sender_name"],
+            "signature": row["signature"]}
 
 
 # Undo a pick's increment when the send did NOT go out (SendRejected /

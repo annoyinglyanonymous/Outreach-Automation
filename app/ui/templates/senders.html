@@ -17,6 +17,7 @@
   </div>
 </div>
 
+{% if blocked %}<p class="flash warn">{{ blocked }}</p>{% endif %}
 {% if sync and sync.error and 'unavailable' not in sync.error and 'not configured' not in sync.error %}
 <p class="flash warn">Couldn't sync from Mailjet ({{ sync.error }}) — showing the last-synced pool.</p>
 {% elif sync and (sync.inserted or sync.deactivated) %}
@@ -34,7 +35,8 @@
       <tbody>
         {% for s in senders %}
         <tr>
-          <td><a href="/ui/senders/{{ s.id }}">{{ s.sender_email }}</a></td>
+          <td><a href="/ui/senders/{{ s.id }}">{{ s.sender_email }}</a>
+            {% if not s.signature %}<span class="sub" style="display:block">no signature — mail sends unsigned</span>{% endif %}</td>
           <td>{{ s.sender_name or '—' }}</td>
           <td class="num">{{ s.sent_today }}</td>
           <td class="num">{{ s.daily_cap }}</td>

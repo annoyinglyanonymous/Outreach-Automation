@@ -131,7 +131,7 @@ def test_create_persists_and_redirects(client, session_cookie, state):
     assert r.status_code == 303
     assert r.headers["location"] == "/ui/senders"
     assert state["created"] == {"sender_email": "new@d2.com", "sender_name": "New",
-                                "daily_cap": 30, "active": True}
+                                "daily_cap": 30, "active": True, "signature": None}
 
 
 def test_create_requires_an_email(client, session_cookie, state):
@@ -178,7 +178,8 @@ def test_update_persists_and_redirects(client, session_cookie, state):
     assert r.status_code == 303
     assert state["updated"] == (1, {"sender_email": "john@d1.com",
                                     "sender_name": "Johnny",
-                                    "daily_cap": 50, "active": True})
+                                    "daily_cap": 50, "active": True,
+                                    "signature": None})
 
 
 def test_update_requires_an_email(client, session_cookie, state):
@@ -202,3 +203,91 @@ def test_delete_removes_and_redirects(client, session_cookie, state):
     r = client.post("/ui/senders/1/delete", cookies=session_cookie)
     assert r.status_code == 303
     assert state["deleted"] == 1
+
+
+# ---- address allowlist (migration 013) -------------------------------
+
+ALLOW = ("business@renegadeinsurance.info", "aayush.gupta@renegade-insurance.com")
+
+
+def test_create_rejects_a_non_allowlisted_address(client, session_cookie, state, monkeypatch):
+    monkeypatch.setattr(type(config), "SENDER_ALLOWED_ADDRESSES", ALLOW)
+    r = client.post("/ui/senders", cookies=session_cookie,
+                    data={"sender_email": "someone@gmail.com"})
+    assert r.status_code == 422
+    assert "not allowed" in r.text.lower()
+    assert state["created"] is None
+
+
+def test_update_rejects_a_non_allowlisted_address(client, session_cookie, state, monkeypatch):
+    monkeypatch.setattr(type(config), "SENDER_ALLOWED_ADDRESSES", ALLOW)
+    r = client.post("/ui/senders/1", cookies=session_cookie,
+                    data={"sender_email": "someone@gmail.com"})
+    assert r.status_code == 422
+    assert state["updated"] is None
+
+
+def test_create_allows_an_allowlisted_address(client, session_cookie, state, monkeypatch):
+    monkeypatch.setattr(type(config), "SENDER_ALLOWED_ADDRESSES", ALLOW)
+    r = client.post("/ui/senders", cookies=session_cookie,
+                    data={"sender_email": "business@renegadeinsurance.info"})
+    assert r.status_code == 303
+    assert state["created"]["sender_email"] == "business@renegadeinsurance.info"
+
+
+def test_create_rejects_another_address_on_an_allowed_domain(client, session_cookie, state, monkeypatch):
+    """The allowlist is exact addresses, not domains — a different mailbox on
+    an approved domain is still rejected."""
+    monkeypatch.setattr(type(config), "SENDER_ALLOWED_ADDRESSES", ALLOW)
+    r = client.post("/ui/senders", cookies=session_cookie,
+                    data={"sender_email": "random@renegadeinsurance.info"})
+    assert r.status_code == 422
+    assert state["created"] is None
+
+
+def test_toggle_will_not_activate_a_non_allowlisted_sender(client, session_cookie, state, monkeypatch):
+    monkeypatch.setattr(type(config), "SENDER_ALLOWED_ADDRESSES", ALLOW)
+    state["sender"] = {**SENDER, "sender_email": "old@gmail.com", "active": False}
+    r = client.post("/ui/senders/1/toggle", cookies=session_cookie)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/ui/senders?blocked=1"
+    assert state["toggled"] is None            # never activated
+
+
+def test_toggle_can_still_pause_a_non_allowlisted_sender(client, session_cookie, state, monkeypatch):
+    """Pausing is always allowed — only activation is blocked."""
+    monkeypatch.setattr(type(config), "SENDER_ALLOWED_ADDRESSES", ALLOW)
+    state["sender"] = {**SENDER, "sender_email": "old@gmail.com", "active": True}
+    r = client.post("/ui/senders/1/toggle", cookies=session_cookie)
+    assert r.status_code == 303
+    assert state["toggled"] == (1, False)      # paused
+
+
+async def test_verified_senders_dropdown_filters_to_the_allowlist(monkeypatch):
+    class FakeMailjet:
+        def __init__(self, *a, **k):
+            pass
+
+        async def list_verified_senders(self):
+            return ["business@renegadeinsurance.info", "nope@gmail.com"]
+
+    monkeypatch.setattr(routes, "MailjetSender", FakeMailjet)
+    monkeypatch.setattr(type(config), "SENDER_ALLOWED_ADDRESSES", ALLOW)
+    addresses, error = await routes._verified_senders()
+    assert addresses == ["business@renegadeinsurance.info"]
+    assert error is None
+
+
+# ---- per-address signature (migration 014) ---------------------------
+
+
+def test_create_persists_a_signature(client, session_cookie, state):
+    client.post("/ui/senders", cookies=session_cookie,
+                data={"sender_email": "x@d.com", "signature": "Best,\nMadhav Gupta"})
+    assert state["created"]["signature"] == "Best,\nMadhav Gupta"
+
+
+def test_blank_signature_is_stored_as_none(client, session_cookie, state):
+    client.post("/ui/senders", cookies=session_cookie,
+                data={"sender_email": "x@d.com", "signature": "   "})
+    assert state["created"]["signature"] is None

@@ -144,6 +144,29 @@ class Config:
     CSV_ONLY_MAX_BYTES: int = _int("CSV_ONLY_MAX_BYTES", 20_000_000)
     CSV_INSERT_CHUNK: int = _int("CSV_INSERT_CHUNK", 500)
 
+    # --- sender policy ----------------------------------------------------
+    # Cold sends may go out ONLY from these exact addresses. The pool
+    # auto-enrols every verified Mailjet sender, so this is the guardrail that
+    # keeps any non-approved verified address out of rotation. Enforced by
+    # making "on the allowlist" a precondition for a sender being active (sync
+    # filter + the Senders write paths + migration 013). Empty = unrestricted
+    # (escape hatch). Parsed like SCHEDULER_STAGES. To add/remove a sending
+    # address, edit this list (and re-run the migration-014-style seed if you
+    # want a default signature for it).
+    SENDER_ALLOWED_ADDRESSES: tuple[str, ...] = tuple(
+        a.strip().lower()
+        for a in os.getenv(
+            "SENDER_ALLOWED_ADDRESSES",
+            "madhav.gupta@renegadeinsurance.info,"
+            "madhav.gupta@renegade-insurance.com,"
+            "business@renegadeinsurance.info,"
+            "business@renegade-insurance.com,"
+            "aayush.gupta@renegadeinsurance.info,"
+            "aayush.gupta@renegade-insurance.com",
+        ).split(",")
+        if a.strip()
+    )
+
     # --- api ------------------------------------------------------------
     # Shared secret required on the mutating endpoints.
     API_KEY: str = os.getenv("API_KEY", "")
@@ -172,6 +195,16 @@ class Config:
             )
             if not value
         ]
+
+    @classmethod
+    def sender_allowed(cls, email: str | None) -> bool:
+        """True if `email` is on SENDER_ALLOWED_ADDRESSES — the one rule for
+        which addresses may send. An empty allowlist means no restriction.
+        Case-insensitive exact-address match: the pool auto-enrols verified
+        senders, so this gate keeps any non-approved address out of rotation."""
+        if not cls.SENDER_ALLOWED_ADDRESSES:
+            return True
+        return (email or "").strip().lower() in cls.SENDER_ALLOWED_ADDRESSES
 
     @classmethod
     def missing_draft_vars(cls) -> list[str]:

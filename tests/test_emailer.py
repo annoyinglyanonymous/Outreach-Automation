@@ -57,6 +57,19 @@ class CapturingSender:
         return "ref"
 
 
+class BodyCapturingSender:
+    """Records the exact body each target arrives with, so a test can assert
+    the signature was appended (or not) at send time."""
+    name = "mailjet"
+
+    def __init__(self):
+        self.bodies: list = []
+
+    async def send(self, t):
+        self.bodies.append(t.email_body)
+        return "ref"
+
+
 @pytest.fixture
 def state(monkeypatch):
     s = {
@@ -399,6 +412,45 @@ async def test_run_syncs_the_pool_from_mailjet_before_claiming(state):
     await emailer.run(SyncingSender(records))
     assert state["synced"] == {"records": records,
                                "default_cap": config.MAILJET_SENDER_DAILY_CAP}
+
+
+@pytest.mark.asyncio
+async def test_sync_pool_drops_non_allowlisted_records(state, monkeypatch):
+    """Only allowlisted addresses enrol; any other verified address is
+    filtered out before the pool is reconciled (so it never rotates in, and an
+    existing non-approved row would be paused as 'no longer verified')."""
+    monkeypatch.setattr(type(config), "SENDER_ALLOWED_ADDRESSES",
+                        ("business@renegadeinsurance.info",))
+    records = [{"email": "business@renegadeinsurance.info", "name": "OK"},
+               {"email": "nope@gmail.com", "name": "Nope"}]
+    await emailer.sync_pool(SyncingSender(records))
+    assert state["synced"]["records"] == [
+        {"email": "business@renegadeinsurance.info", "name": "OK"}]
+
+
+@pytest.mark.asyncio
+async def test_signature_is_appended_from_the_picked_sender(state):
+    """The drafter writes no closing; the emailer appends the sending
+    address's signature at send time (keyed on the actual From)."""
+    cap = BodyCapturingSender()
+    state["pool"] = [{"sender_email": "a@d1.com", "sender_name": "A",
+                      "signature": "Best,\nMadhav Gupta"}]
+    state["claims"] = [[target(1)]]        # target body is "B"
+
+    await emailer.run(cap)
+
+    assert cap.bodies == ["B\n\nBest,\nMadhav Gupta"]
+
+
+@pytest.mark.asyncio
+async def test_no_signature_leaves_the_body_unchanged(state):
+    cap = BodyCapturingSender()
+    state["pool"] = [{"sender_email": "a@d1.com", "sender_name": "A"}]  # no signature
+    state["claims"] = [[target(1)]]
+
+    await emailer.run(cap)
+
+    assert cap.bodies == ["B"]
 
 
 @pytest.mark.asyncio

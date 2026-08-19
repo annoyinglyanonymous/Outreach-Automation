@@ -76,12 +76,15 @@ async def test_missing_url_falls_back_without_http(monkeypatch):
 
 
 def test_generic_fallback_renders_through_drafting():
-    """The generic template must use merge fields the send path resolves."""
+    """The generic template uses only merge fields the send path resolves, and
+    carries NO sign-off — the sending address's signature is appended at send
+    time, so {{sender}} no longer appears in the body."""
     fields = campaign_brief.fallback_brief("Objective text")
     rendered = drafting.render_template(fields["fallback_email_body"], {
         "first_name": "Jane", "company": "Doe Insurance", "sender": "Dana",
     })
-    assert "Jane" in rendered and "Doe Insurance" in rendered and "Dana" in rendered
+    assert "Jane" in rendered and "Doe Insurance" in rendered
+    assert "Dana" not in rendered   # no signature baked into the body
     assert "{{" not in rendered
     subject = drafting.render_template(fields["fallback_email_subject"],
                                        {"company": "Doe Insurance"})

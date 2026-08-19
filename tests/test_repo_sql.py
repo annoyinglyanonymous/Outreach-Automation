@@ -128,6 +128,14 @@ def test_rotating_sender_pick_is_atomic_lru_and_resets_daily():
     assert "sent_today + 1" in sql                        # counts a real send
 
 
+def test_sender_picks_return_the_signature():
+    """Both send picks must return the per-address signature so the emailer
+    can append it at send time (migration 014)."""
+    assert "signature" in repo.MAILJET_SENDER_FIELDS
+    assert "m.signature" in repo.CLAIM_ROTATING_SENDER_SQL
+    assert "m.signature" in repo.CLAIM_PINNED_SENDER_SQL
+
+
 def test_rotating_sender_release_floors_and_is_day_scoped():
     sql = repo.RELEASE_ROTATING_SENDER_SQL
     assert "GREATEST(sent_today - 1, 0)" in sql   # never negative

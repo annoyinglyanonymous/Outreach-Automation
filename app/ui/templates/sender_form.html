@@ -17,7 +17,8 @@
     <div class="col">
       <label>From address
         <span class="sub">A Mailjet-validated sending address; its domain must be verified
-        (SPF/DKIM) in Mailjet.</span>
+        (SPF/DKIM) in Mailjet.{% if allowed_addresses %} Only these addresses may send:
+        {{ allowed_addresses | join(', ') }}.{% endif %}</span>
         {% if verified and not sender_error %}
         <input name="sender_email" list="verified-senders" type="email"
                value="{{ (sender.sender_email or '') if sender else '' }}" required>
@@ -48,6 +49,11 @@
         Active — include in rotation</label>
     </div>
   </div>
+  <label>Signature
+    <span class="sub">Appended to every email sent from this address, exactly as typed
+    (the AI writes no closing). Leave blank for no signature.</span>
+    <textarea name="signature" rows="6"
+              placeholder="Best,&#10;Madhav Gupta&#10;Founder’s Office (M&amp;A)&#10;Renegade Insurance&#10;+1 678 500 9991">{{ (sender.signature or '') if sender else '' }}</textarea></label>
   <button type="submit">{{ 'Save changes' if editing else 'Add sender' }}</button>
 </form>
 

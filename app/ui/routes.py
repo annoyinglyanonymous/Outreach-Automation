@@ -469,9 +469,12 @@ def _campaign_flashes(request: Request) -> list[dict]:
 async def _verified_senders() -> tuple[list[str], str | None]:
     """(verified from-addresses, error). Best-effort: a Mailjet outage or
     unset keys degrade the sender dropdown to manual entry rather than
-    breaking the edit page, so the ProviderError is returned, not raised."""
+    breaking the edit page, so the ProviderError is returned, not raised.
+    Only allowlisted addresses are offered (config.SENDER_ALLOWED_ADDRESSES)
+    so the datalist can't suggest an address that could never send."""
     try:
-        return await MailjetSender().list_verified_senders(), None
+        addresses = await MailjetSender().list_verified_senders()
+        return [a for a in addresses if config.sender_allowed(a)], None
     except ProviderError as exc:
         log.warning("sender list: %s", exc)
         return [], str(exc)
@@ -793,6 +796,12 @@ async def campaign_upload(request: Request, campaign_id: int,
 # ---------------------------------------------------------------------
 
 
+def _address_error() -> str:
+    """The message shown when a sender address is outside the allowlist."""
+    return ("Sender address not allowed — cold sends may only come from an "
+            "approved address: " + ", ".join(config.SENDER_ALLOWED_ADDRESSES) + ".")
+
+
 def _sender_fields(form) -> dict:
     """Parse the sender form. daily_cap falls back to the configured default
     on a blank/garbage value; active is a checkbox (absent = unchecked)."""
@@ -806,6 +815,8 @@ def _sender_fields(form) -> dict:
         "active": str(form.get("active") or "").strip().lower()
         in ("1", "true", "on", "yes"),
         "daily_cap": cap,
+        # The per-address signature block appended at send time; blank = none.
+        "signature": str(form.get("signature") or "").strip() or None,
     }
 
 
@@ -816,6 +827,7 @@ def _sender_form_page(request: Request, session: Session, sender,
         "sender": sender, "error": error,
         "verified": verified or [], "sender_error": sender_error,
         "default_cap": config.MAILJET_SENDER_DAILY_CAP,
+        "allowed_addresses": config.SENDER_ALLOWED_ADDRESSES,
     }, status_code=status_code)
 
 
@@ -827,7 +839,11 @@ async def senders_page(request: Request, session: Session = Depends(require_sess
     # pool still renders, with a banner explaining the skip.
     sync = await emailer.sync_pool()
     return _page(request, "senders.html", session, "senders",
-                 {"senders": await repo.list_senders(), "sync": sync})
+                 {"senders": await repo.list_senders(), "sync": sync,
+                  # Set by sender_toggle when it refused to resume a
+                  # non-allowlisted sender (?blocked=1).
+                  "blocked": _address_error()
+                  if request.query_params.get("blocked") else None})
 
 
 @router.get("/senders/new", response_class=HTMLResponse)
@@ -844,6 +860,9 @@ async def sender_create(request: Request, session: Session = Depends(require_ses
     if not fields["sender_email"]:
         return _sender_form_page(request, session, fields,
                                  error="A sender email is required.", status_code=422)
+    if not config.sender_allowed(fields["sender_email"]):
+        return _sender_form_page(request, session, fields,
+                                 error=_address_error(), status_code=422)
     try:
         await repo.create_sender(fields)
     except asyncpg.UniqueViolationError:
@@ -871,6 +890,9 @@ async def sender_update(request: Request, sender_id: int,
     if not fields["sender_email"]:
         return _sender_form_page(request, session, stale,
                                  error="A sender email is required.", status_code=422)
+    if not config.sender_allowed(fields["sender_email"]):
+        return _sender_form_page(request, session, stale,
+                                 error=_address_error(), status_code=422)
     try:
         await repo.update_sender(sender_id, fields)
     except asyncpg.UniqueViolationError:
@@ -887,7 +909,13 @@ async def sender_toggle(request: Request, sender_id: int,
     sender = await repo.get_sender(sender_id)
     if sender is None:
         raise HTTPException(status_code=404)
-    await repo.set_sender_active(sender_id, not sender["active"])
+    activating = not sender["active"]
+    # Never resume a non-allowlisted sender back into rotation — pausing is
+    # always fine, activating is the dangerous direction. Surface why (a silent
+    # no-op would look like the button was broken).
+    if activating and not config.sender_allowed(sender["sender_email"]):
+        return RedirectResponse("/ui/senders?blocked=1", status_code=303)
+    await repo.set_sender_active(sender_id, activating)
     return RedirectResponse("/ui/senders", status_code=303)
 
 
