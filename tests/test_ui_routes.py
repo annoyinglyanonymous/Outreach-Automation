@@ -215,6 +215,26 @@ def test_review_page_lists_cards(client, session_cookie, calls):
     assert b"Subject" in response.content
 
 
+def test_review_page_says_when_more_are_waiting_than_shown(client, session_cookie,
+                                                           calls, monkeypatch):
+    """The queue renders at most 50 cards (repo default limit) while the tab
+    count is the full total — the page must SAY so, or the mismatch reads as
+    missing mail (live operator question, 2026-08-19)."""
+    async def review_counts():
+        return {"pending_review": 120}
+    monkeypatch.setattr(repo, "review_counts", review_counts)
+
+    body = client.get("/ui/review", cookies=session_cookie).text
+    assert "Showing the oldest 1 of 120" in body   # calls fixture yields 1 card
+
+    # And no hint when everything fits on one page.
+    async def review_counts_small():
+        return {"pending_review": 1}
+    monkeypatch.setattr(repo, "review_counts", review_counts_small)
+    body = client.get("/ui/review", cookies=session_cookie).text
+    assert "Showing the oldest" not in body
+
+
 def test_review_queue_sql_selects_linkedin_status():
     """The card template branches on linkedin_status; fakes bypass SQL,
     so pin the column list itself — omitting it rendered every card as

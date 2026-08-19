@@ -21,6 +21,18 @@
 </div>
 
 {% if queue %}
+  {# The queue query caps at 50 cards per load (oldest first) so the page stays
+     light; the tab counts are the FULL totals. Say so when they differ, or the
+     mismatch reads as missing mail. The count is campaign-agnostic, so under a
+     campaign filter we only know "the cap was hit". #}
+  {% set total = counts.get(status, 0) %}
+  {% if not campaign_id and total > queue|length %}
+  <p class="hint">Showing the oldest {{ queue|length }} of {{ total }} — approve or
+    reject to surface the next batch, or filter by campaign.</p>
+  {% elif campaign_id and queue|length >= 50 %}
+  <p class="hint">Showing the oldest 50 for this campaign — approve or reject to
+    surface more.</p>
+  {% endif %}
   <div class="review-queue" style="display:grid;gap:16px">
   {% for contact in queue %}
     {% with message = None, error = False %}
