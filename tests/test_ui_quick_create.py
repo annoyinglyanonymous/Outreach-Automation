@@ -196,6 +196,13 @@ def test_create_linkedin_mode_still_uses_n8n_and_nudges_enrich(client, session_c
     assert state["nudges"] == ["enrich"]
 
 
+def test_new_campaign_starts_gated_pending_test(client, session_cookie, state):
+    """Every new campaign is gated (migration 017) — no real emails send until
+    a test is approved."""
+    create(client, session_cookie)
+    assert state["created"]["test_status"] == "pending"
+
+
 def test_send_mode_defaults_to_batch(client, session_cookie, state):
     """No send_mode posted -> the drip default (a legal CHECK value, never '')."""
     create(client, session_cookie)

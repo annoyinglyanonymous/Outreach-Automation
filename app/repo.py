@@ -687,6 +687,10 @@ WITH claimed AS (
      WHERE c.email_status = 'drafted'
        AND c.review_status = 'approved'
        AND g.status = 'active'
+       -- Test gate (migration 017): no real email sends until the campaign's
+       -- test is approved. Applies to the drip AND send_campaign_now (both
+       -- claim through here); surfaced by unsendable_approved_counts.
+       AND g.test_status = 'approved'
        AND EXISTS (SELECT 1 FROM mailjet_senders m
                     WHERE m.active
                       AND (m.daily_cap <= 0
@@ -855,6 +859,8 @@ SELECT g.name AS campaign_name,
              THEN 'pinned sender inactive'
          WHEN NOT EXISTS (SELECT 1 FROM mailjet_senders m WHERE m.active)
              THEN 'no active senders in the rotation pool'
+         WHEN g.test_status <> 'approved'
+             THEN 'held for test approval'
          ELSE 'unsendable'
        END AS reason,
        count(*)::int AS contacts
@@ -870,6 +876,7 @@ SELECT g.name AS campaign_name,
    -- campaign pinned to a paused mailbox is surfaced even while the pool has
    -- other active senders.
    AND (g.status = 'active'
+    AND g.test_status = 'approved'
     AND EXISTS (SELECT 1 FROM mailjet_senders m
                  WHERE m.active
                    AND (g.pinned_sender_id IS NULL
@@ -909,6 +916,7 @@ SELECT c.id, c.email, c.first_name, c.last_name, c.company,
  WHERE c.email_status = 'drafted'
    AND c.review_status = 'approved'
    AND g.status = 'active'
+   AND g.test_status = 'approved'   -- mirror the claim's test gate (017)
    AND NOT EXISTS (SELECT 1 FROM suppression s
                     WHERE lower(s.email) = lower(c.email))
    AND ($1::bigint IS NULL OR c.campaign_id = $1)
@@ -1410,6 +1418,10 @@ CAMPAIGN_FIELDS = (
     # (drain this campaign's approved queue the instant each contact is
     # approved, ignoring window + pacing). Edit form owns it.
     "send_mode",
+    # migration 017: test-email gate. 'pending' (new campaigns) -> 'sent' ->
+    # 'approved'; only 'approved' lets real emails send (CLAIM_EMAIL_SQL). Owned
+    # by the test-send/approve actions, NOT the edit form — see the exclusions.
+    "test_status",
 )
 
 # Everything the edit form owns — i.e. CAMPAIGN_FIELDS minus the columns the
@@ -1423,7 +1435,11 @@ CAMPAIGN_FIELDS = (
 #   the form dropped both fields. Excluding them here preserves any existing
 #   value instead of the (now absent) form writing NULL over the NOT-NULL
 #   sender_name. Creation still seeds both (as "").
-_CAMPAIGN_UPDATE_EXCLUDED = ("smartlead_campaign_id", "sender_name", "sender_role")
+# - test_status: owned by the test-send / approve-release actions
+#   (mark_campaign_test_sent, approve_campaign_test), not the edit form — an
+#   edit must never silently re-gate or release a campaign.
+_CAMPAIGN_UPDATE_EXCLUDED = ("smartlead_campaign_id", "sender_name",
+                             "sender_role", "test_status")
 CAMPAIGN_UPDATE_FIELDS = tuple(
     f for f in CAMPAIGN_FIELDS if f not in _CAMPAIGN_UPDATE_EXCLUDED
 )
@@ -1456,6 +1472,25 @@ async def update_campaign(campaign_id: int, fields: dict) -> bool:
         UPDATE_CAMPAIGN_SQL, campaign_id,
         *[fields.get(f) for f in CAMPAIGN_UPDATE_FIELDS]
     )
+    return row is not None
+
+
+# --- test-email gate (migration 017) ----------------------------------
+# Owned here, not by the edit form: sending a test moves a gated campaign to
+# 'sent', approving releases it. Neither downgrades an already-approved
+# campaign (re-testing a live campaign must not re-gate it).
+async def mark_campaign_test_sent(campaign_id: int) -> bool:
+    row = await pool().fetchrow(
+        "UPDATE campaigns SET test_status = 'sent' "
+        "WHERE id = $1 AND test_status = 'pending' RETURNING id;", campaign_id)
+    return row is not None
+
+
+async def approve_campaign_test(campaign_id: int) -> bool:
+    """Release the campaign — real emails may now send (CLAIM_EMAIL_SQL gate)."""
+    row = await pool().fetchrow(
+        "UPDATE campaigns SET test_status = 'approved' WHERE id = $1 RETURNING id;",
+        campaign_id)
     return row is not None
 
 

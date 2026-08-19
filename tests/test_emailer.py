@@ -509,6 +509,30 @@ async def test_signature_is_appended_from_the_picked_sender(state):
 
 
 @pytest.mark.asyncio
+async def test_send_test_email_uses_the_test_address_and_signature():
+    """The test send goes to the given inbox with the mailbox's signature
+    appended, through the normal send path — and touches no real contact
+    (no claim, no mark)."""
+    class Cap:
+        name = "mailjet"
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, t):
+            self.sent.append((t.email, t.email_body, t.sender_email))
+            return "test-ref"
+
+    cap = Cap()
+    ref = await emailer.send_test_email(
+        to_address="me@inbox.com", subject="S", body="Hi there",
+        sender_email="a@d1.com", sender_name="A", signature="Best,\nMadhav",
+        sender=cap)
+
+    assert ref == "test-ref"
+    assert cap.sent == [("me@inbox.com", "Hi there\n\nBest,\nMadhav", "a@d1.com")]
+
+
+@pytest.mark.asyncio
 async def test_no_signature_leaves_the_body_unchanged(state):
     cap = BodyCapturingSender()
     state["pool"] = [{"sender_email": "a@d1.com", "sender_name": "A"}]  # no signature

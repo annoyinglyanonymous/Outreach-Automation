@@ -24,7 +24,7 @@ from .. import campaign_brief, drafting, emailer, repo, runs, send_schedule
 from ..config import config
 from ..drafting import NOTE_MAX_CHARS
 from ..providers import n8n, supabase_auth
-from ..providers.base import ProviderError
+from ..providers.base import ProviderError, SendRejected, SendUncertain
 from ..providers.mailjet import MailjetSender
 from . import router, templates
 from .auth import (
@@ -507,13 +507,24 @@ _INGEST_FLASHES = {
     "failed": ("error", "Contact ingestion is unreachable — the campaign is fine; "
                         "upload the CSV again below."),
 }
+_TEST_FLASHES = {
+    "sent": ("ok", "Test email sent — check that inbox, then Approve & release below."),
+    "approved": ("ok", "Campaign released — approved emails will now send."),
+    "bad_address": ("error", "Enter a valid email address for the test."),
+    "no_sender": ("error", "No active sending mailbox for the test — activate one on "
+                           "the Senders page (or the pinned mailbox is paused)."),
+    "no_draft": ("error", "Couldn't draft a test email — check the drafting (LLM) "
+                          "configuration."),
+    "failed": ("error", "The test email couldn't be sent — check Mailjet and retry."),
+}
 
 
 def _campaign_flashes(request: Request) -> list[dict]:
     flashes = []
     params = request.query_params
     for key, table in (("brief", _BRIEF_FLASHES),
-                       ("ingest", _INGEST_FLASHES)):
+                       ("ingest", _INGEST_FLASHES),
+                       ("test", _TEST_FLASHES)):
         entry = table.get(params.get(key, ""))
         if entry:
             flashes.append({"level": entry[0], "text": entry[1]})
@@ -636,6 +647,27 @@ def _brief_from_form(form) -> dict:
     }
 
 
+def _brief_from_campaign(campaign: dict) -> dict:
+    """The aliased brief dict drafting.preview_draft expects, read from a saved
+    campaign row (offer_description -> offer, sender_name -> sender). Used by the
+    test-send to draft a real sample. The drafting prompt is fixed now, so the
+    brief only feeds the no-profile fallback template + the csv/linkedin path
+    choice; the personalised copy is unaffected by it."""
+    def g(name: str):
+        return campaign.get(name) or None
+    return {
+        "offer": g("offer_description"),
+        "cta": g("cta"),
+        "tone": g("tone"),
+        "sender": g("sender_name"),
+        "sender_role": g("sender_role"),
+        "audience_rationale": g("audience_rationale"),
+        "fallback_email_subject": g("fallback_email_subject"),
+        "fallback_email_body": g("fallback_email_body"),
+        "enrichment_mode": campaign.get("enrichment_mode") or "linkedin",
+    }
+
+
 def _oversize(file: UploadFile, max_bytes: int | None = None) -> int | None:
     """The upload's declared size when it exceeds the cap, else None. The cap
     defaults to the n8n path's CSV_MAX_BYTES; the CSV-only path passes its
@@ -718,6 +750,9 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
         # Send mode from the form (default 'batch'); _send_mode normalizes it,
         # since the "" the CAMPAIGN_FIELDS seed set would trip the CHECK.
         "send_mode": send_mode,
+        # New campaigns are gated (migration 017): no real emails send until a
+        # test is approved. "" from the seed would trip the CHECK.
+        "test_status": "pending",
     })
     try:
         campaign_id = await repo.create_campaign(fields)
@@ -825,6 +860,76 @@ async def campaign_send_now(request: Request, campaign_id: int,
     stats = await emailer.send_campaign_now(campaign_id)
     return RedirectResponse(
         f"/ui/campaigns/{campaign_id}?sent_now={stats.sent}", status_code=303)
+
+
+@router.post("/campaigns/{campaign_id}/test-send")
+async def campaign_test_send(request: Request, campaign_id: int,
+                             session: Session = Depends(require_session)):
+    """Send one test copy of this campaign's email to an inbox the operator
+    controls, so they can eyeball it before releasing the campaign. Drafts a
+    real sample, draws the From (pinned mailbox, else the first active sender)
+    and its signature, sends via Mailjet, and moves the gate to 'sent'. Touches
+    no real contact."""
+    check_origin(request)
+    campaign = await repo.get_campaign(campaign_id)
+    if campaign is None:
+        raise HTTPException(status_code=404)
+
+    def back(code: str):
+        return RedirectResponse(f"/ui/campaigns/{campaign_id}?test={code}",
+                                status_code=303)
+
+    form = await request.form()
+    to_address = str(form.get("test_email") or "").strip()
+    if "@" not in to_address:
+        return back("bad_address")
+
+    # The From: the pinned mailbox, else the least-recently-used active sender.
+    # A plain read — the test must NOT consume a rotation slot / daily count.
+    pinned = campaign.get("pinned_sender_id")
+    if pinned:
+        sender_row = await repo.get_sender(pinned)
+    else:
+        actives = await repo.active_senders_in_rotation_order()
+        sender_row = await repo.get_sender(actives[0]["id"]) if actives else None
+    if not sender_row or not sender_row.get("active"):
+        return back("no_sender")
+
+    # Draft a real sample (a live contact if any, else the synthetic sample).
+    contact = await repo.get_preview_contact(campaign_id)
+    preview = await drafting.preview_draft(_brief_from_campaign(campaign),
+                                           contact=contact)
+    chosen = preview.get("personalized") or preview.get("template") or {}
+    body = chosen.get("body")
+    if not body:
+        return back("no_draft")
+
+    try:
+        await emailer.send_test_email(
+            to_address=to_address, subject=chosen.get("subject") or "(no subject)",
+            body=body, sender_email=sender_row["sender_email"],
+            sender_name=sender_row.get("sender_name"),
+            signature=sender_row.get("signature"))
+    except (ProviderError, SendRejected, SendUncertain) as exc:
+        log.error("test send for campaign %d: %s", campaign_id, exc)
+        return back("failed")
+
+    await repo.mark_campaign_test_sent(campaign_id)
+    return back("sent")
+
+
+@router.post("/campaigns/{campaign_id}/test-approve")
+async def campaign_test_approve(request: Request, campaign_id: int,
+                                session: Session = Depends(require_session)):
+    """Release the campaign — real emails may now send (the CLAIM_EMAIL_SQL
+    test gate). Idempotent; a missing campaign 404s."""
+    check_origin(request)
+    campaign = await repo.get_campaign(campaign_id)
+    if campaign is None:
+        raise HTTPException(status_code=404)
+    await repo.approve_campaign_test(campaign_id)
+    return RedirectResponse(f"/ui/campaigns/{campaign_id}?test=approved",
+                            status_code=303)
 
 
 @router.post("/campaigns/{campaign_id}/delete")

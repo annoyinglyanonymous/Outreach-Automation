@@ -339,3 +339,22 @@ async def send_campaign_now(campaign_id: int,
     stats.seconds = time.monotonic() - started
     log.info("send-now complete for campaign %d: %s", campaign_id, stats.as_dict())
     return stats
+
+
+async def send_test_email(*, to_address: str, subject: str, body: str,
+                          sender_email: str, sender_name: str | None,
+                          signature: str | None,
+                          sender: EmailSender | None = None) -> str:
+    """Send ONE test copy to an inbox the operator controls (the test-email
+    gate), so they can eyeball the real rendered email — signature appended,
+    HTML link live — before releasing the campaign. Reuses the live send path
+    (mailjet.send → render_html_body) but touches NO real contact and records
+    nothing. Returns the provider ref; raises on a send failure."""
+    sender = sender if sender is not None else build_sender()
+    if sender is None:
+        raise ProviderError("Mailjet is not configured")
+    target = repo.EmailTarget(
+        id=0, email=to_address, first_name="Test", last_name=None, company=None,
+        email_subject=subject, email_body=_with_signature(body, signature),
+        sender_email=sender_email, sender_name=sender_name)
+    return await sender.send(target)

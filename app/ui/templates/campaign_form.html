@@ -161,6 +161,35 @@
 </section>
 
 <section class="card" style="margin-top:24px">
+  <div class="card-head"><h2>Test &amp; release</h2></div>
+  {% set ts = campaign.test_status or 'pending' %}
+  <p class="hint">
+    {% if ts == 'approved' %}
+    <span class="badge active">Released</span>
+    {% elif ts == 'sent' %}
+    <span class="badge">Test sent — awaiting approval</span>
+    {% else %}
+    <span class="badge paused">Pending test</span>
+    {% endif %}
+    No real emails send from this campaign until a test is approved. Send a copy to an inbox you
+    control (a real draft with the sending mailbox's signature — no real contact is touched),
+    eyeball it, then release.
+  </p>
+  <form method="post" action="/ui/campaigns/{{ campaign.id }}/test-send"
+        class="row-actions" style="align-items:flex-end">
+    <label style="flex:1; min-width:240px">Test recipient
+      <input name="test_email" type="email" value="{{ session.email or '' }}" required></label>
+    <button type="submit" class="secondary">Send test email</button>
+  </form>
+  {% if ts != 'approved' %}
+  <form method="post" action="/ui/campaigns/{{ campaign.id }}/test-approve" style="margin-top:12px"
+        onsubmit="return confirm('Release this campaign? Approved contacts will start sending.')">
+    <button type="submit">Approve &amp; release</button>
+  </form>
+  {% endif %}
+</section>
+
+<section class="card" style="margin-top:24px">
   <div class="card-head"><h2>Send approved now</h2></div>
   <p class="hint">
     Sends every <strong>approved-but-unsent</strong> contact in this campaign immediately —

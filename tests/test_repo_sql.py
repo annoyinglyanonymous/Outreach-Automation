@@ -185,6 +185,29 @@ def test_email_claim_can_scope_to_one_campaign():
     assert "$2::bigint IS NULL" in sql
 
 
+def test_email_claim_is_gated_on_test_approval():
+    """No real email sends until the campaign's test is approved (migration
+    017) — enforced in the claim, so the drip AND send_campaign_now respect it,
+    and mirrored in the schedule forecast."""
+    assert "g.test_status = 'approved'" in repo.CLAIM_EMAIL_SQL
+    assert "g.test_status = 'approved'" in repo.APPROVED_UNSENT_SQL
+
+
+def test_unsendable_report_names_a_test_gated_campaign():
+    """A campaign held for test approval must be surfaced (not silently
+    missing), and its gate is part of the report's sendable predicate."""
+    sql = repo.UNSENDABLE_APPROVED_SQL
+    assert "held for test approval" in sql
+    assert "g.test_status = 'approved'" in sql
+
+
+def test_test_status_is_a_create_field_not_an_edit_field():
+    """Created with the gate seeded; the edit form never writes it (only the
+    test-send / approve actions do)."""
+    assert "test_status" in repo.CAMPAIGN_FIELDS
+    assert "test_status" not in repo.CAMPAIGN_UPDATE_FIELDS
+
+
 def test_schedule_queries_mirror_the_claim_and_carry_the_mailbox():
     """The Schedule forecast reads the approved-unsent queue in the SAME order
     and with the same sendable predicate the claim uses (minus sender capacity,

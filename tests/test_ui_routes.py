@@ -836,6 +836,88 @@ def test_schedule_page_renders_batches_and_recent(client, session_cookie, monkey
     assert "sam@x.com" in body       # recent send
 
 
+def test_test_send_drafts_sends_and_marks_sent(client, session_cookie, monkeypatch):
+    """The test-send drafts a real sample, sends it to the typed address with
+    the mailbox's signature, marks the gate 'sent', and flashes success."""
+    seen = {}
+
+    async def get_campaign(cid):
+        return {"id": cid, "name": "W", "pinned_sender_id": None,
+                "offer_description": "O", "cta": "C", "tone": "T",
+                "sender_name": "", "sender_role": "", "audience_rationale": "A",
+                "fallback_email_subject": "FS", "fallback_email_body": "FB",
+                "enrichment_mode": "linkedin"}
+
+    async def active_senders_in_rotation_order():
+        return [{"id": 1, "sender_email": "a@d1.com", "sender_name": "A"}]
+
+    async def get_sender(sid):
+        return {"id": sid, "sender_email": "a@d1.com", "sender_name": "A",
+                "signature": "Sig", "active": True}
+
+    async def get_preview_contact(cid):
+        return None
+
+    async def preview_draft(campaign, contact=None):
+        return {"personalized": {"subject": "S", "body": "B", "linkedin_note": None},
+                "template": {"subject": "", "body": ""}, "error": None, "note": None}
+
+    async def send_test_email(**kw):
+        seen["sent"] = kw
+        return "ref"
+
+    async def mark_campaign_test_sent(cid):
+        seen["marked"] = cid
+        return True
+
+    monkeypatch.setattr(repo, "get_campaign", get_campaign)
+    monkeypatch.setattr(repo, "active_senders_in_rotation_order",
+                        active_senders_in_rotation_order)
+    monkeypatch.setattr(repo, "get_sender", get_sender)
+    monkeypatch.setattr(repo, "get_preview_contact", get_preview_contact)
+    monkeypatch.setattr(routes.drafting, "preview_draft", preview_draft)
+    monkeypatch.setattr(routes.emailer, "send_test_email", send_test_email)
+    monkeypatch.setattr(repo, "mark_campaign_test_sent", mark_campaign_test_sent)
+
+    r = client.post("/ui/campaigns/3/test-send", cookies=session_cookie,
+                    data={"test_email": "me@x.com"})
+    assert r.status_code == 303
+    assert r.headers["location"] == "/ui/campaigns/3?test=sent"
+    assert seen["sent"]["to_address"] == "me@x.com"
+    assert seen["sent"]["signature"] == "Sig"
+    assert seen["marked"] == 3
+
+
+def test_test_send_rejects_a_bad_address(client, session_cookie, monkeypatch):
+    async def get_campaign(cid):
+        return {"id": cid, "pinned_sender_id": None}
+    monkeypatch.setattr(repo, "get_campaign", get_campaign)
+
+    r = client.post("/ui/campaigns/3/test-send", cookies=session_cookie,
+                    data={"test_email": "not-an-email"})
+    assert r.status_code == 303
+    assert r.headers["location"] == "/ui/campaigns/3?test=bad_address"
+
+
+def test_test_approve_releases_and_redirects(client, session_cookie, monkeypatch):
+    seen = {}
+
+    async def get_campaign(cid):
+        return {"id": cid}
+
+    async def approve_campaign_test(cid):
+        seen["approved"] = cid
+        return True
+
+    monkeypatch.setattr(repo, "get_campaign", get_campaign)
+    monkeypatch.setattr(repo, "approve_campaign_test", approve_campaign_test)
+
+    r = client.post("/ui/campaigns/5/test-approve", cookies=session_cookie)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/ui/campaigns/5?test=approved"
+    assert seen["approved"] == 5
+
+
 def test_send_now_sends_and_redirects_with_count(client, session_cookie, monkeypatch):
     """The per-campaign override calls emailer.send_campaign_now for that id and
     redirects back with the number sent (surfaced as a flash)."""
