@@ -39,8 +39,9 @@
     </div>
     <div class="col">
       <label>Daily cap
-        <span class="sub">Cold sends per day from this domain. Start low for a fresh domain
-        ({{ default_cap }}) and raise it over the first weeks as reputation builds.</span>
+        <span class="sub">Cold sends per day from this mailbox. <strong>0 = no daily limit</strong>
+        (the default now — the business-hours drip is the throttle). Set a positive number to
+        throttle a single fresh domain while it warms up.</span>
         <input name="daily_cap" type="number" min="0"
                value="{{ sender.daily_cap if editing else default_cap }}"></label>
       <label style="flex-direction:row; align-items:center; gap:8px">

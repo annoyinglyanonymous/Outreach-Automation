@@ -2,6 +2,7 @@
    campaign (or a synthetic sample when none is ingested yet), rendered like a
    real email (From / To / Subject / body). Non-persisting — nothing here is
    saved or sent. #}
+{% from "fragments/_signature.html" import signature_block %}
 {% set is_real = preview.source == 'contact' %}
 <div class="preview-out">
   {% if is_real %}
@@ -17,6 +18,7 @@
       <div class="eh-subject">{{ preview.personalized.subject or '(no subject)' }}</div>
     </div>
     <div class="email-body">{{ preview.personalized.body or '(no body)' }}</div>
+    {{ signature_block(preview.pinned_sender_id, preview.signature) }}
   </article>
   {% if preview.personalized.linkedin_note %}
   <div class="ln-note">
@@ -33,6 +35,9 @@
   <p class="flash warn" style="margin:14px 0 0">{{ preview.error }}</p>
   {% endif %}
 
+  {# CSV-only campaigns never use the fallback template (every contact is
+     drafted from the sheet), so show only the email that's actually sent. #}
+  {% if not preview.csv_mode %}
   <div class="pv-label">Fallback template · used when a contact has no LinkedIn profile</div>
   <article class="email-card">
     <div class="email-head">
@@ -41,7 +46,9 @@
       <div class="eh-subject">{{ preview.template.subject or '(no subject)' }}</div>
     </div>
     <div class="email-body">{{ preview.template.body or '(no body)' }}</div>
+    {{ signature_block(preview.pinned_sender_id, preview.signature) }}
   </article>
+  {% endif %}
 
   <p class="hint" style="margin-top:14px">
     {% if is_real %}Live draft for a real contact — nothing is saved or sent.

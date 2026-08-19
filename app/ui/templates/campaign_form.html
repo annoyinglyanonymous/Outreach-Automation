@@ -67,10 +67,9 @@
           <option value="linkedin" {% if emode != 'csv' %}selected{% endif %}>LinkedIn — find, scrape &amp; verify (full pipeline)</option>
           <option value="csv" {% if emode == 'csv' %}selected{% endif %}>CSV only — personalize from the sheet, skip LinkedIn</option>
         </select></label>
-      <label>Sender name <input name="sender_name" value="{{ campaign.sender_name if campaign else '' }}"></label>
-      {# (x or '') everywhere below: NULL columns render as the literal
-         string "None" otherwise, which a Save would then persist. #}
-      <label>Sender role <input name="sender_role" value="{{ (campaign.sender_role or '') if campaign else '' }}"></label>
+      {# No Sender name/role fields: a contact's From name and sign-off come
+         entirely from the sending mailbox (its pool name + per-address
+         signature), so a per-campaign sender identity is redundant. #}
       {# Sending mailbox. Default (empty value) rotates the From across the
          whole verified pool; picking one pins every send for this campaign
          to that mailbox. Senders come from repo.list_senders (campaign_edit).
@@ -145,6 +144,26 @@
     <button type="submit" class="secondary">Upload &amp; ingest</button>
   </form>
   <div id="upload-result"></div>
+</section>
+
+<section class="card" style="margin-top:24px">
+  <div class="card-head"><h2>Send approved now</h2></div>
+  <p class="hint">
+    Sends every <strong>approved-but-unsent</strong> contact in this campaign immediately —
+    bypassing the business-hours window and the 5-minute drip pacing. Use it to warm a mailbox
+    or push a small urgent batch. Every other safeguard still applies: suppression, one email
+    per contact, the sender allowlist, and the appended signature.
+    {% if campaign.get('pinned_sender_id') %}
+    Sends from this campaign's pinned mailbox.
+    {% else %}
+    This campaign rotates across the whole pool — pin a mailbox above if you want every one to
+    go from a single address.
+    {% endif %}
+  </p>
+  <form method="post" action="/ui/campaigns/{{ campaign.id }}/send-now"
+        onsubmit="return confirm('Send all approved contacts in this campaign right now, bypassing the send window and pacing?')">
+    <button type="submit" class="secondary">Send approved now</button>
+  </form>
 </section>
 
 <section class="card" style="margin-top:24px">

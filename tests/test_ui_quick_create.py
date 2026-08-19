@@ -107,8 +107,9 @@ def state(monkeypatch):
 
 
 def create(client, session_cookie, with_csv=True, **overrides):
-    data = {"name": "Test", "objective": "Sell the platform",
-            "sender_name": "Dana", "sender_role": "AE"}
+    # No sender_name/sender_role — the form dropped them (identity comes from
+    # the sending mailbox now).
+    data = {"name": "Test", "objective": "Sell the platform"}
     data.update(overrides)
     files = {"file": ("c.csv", CSV, "text/csv")} if with_csv else None
     return client.post("/ui/campaigns", data=data, files=files, cookies=session_cookie)
@@ -127,7 +128,9 @@ def test_happy_path(client, session_cookie, state):
     assert state["created"]["consent_status"] == "cold"
     assert state["created"]["status"] == "active"
     assert state["created"]["offer_description"] == "Generated offer"
-    assert state["created"]["sender_name"] == "Dana"
+    # sender_name/role are no longer collected — seeded as "" (NOT NULL).
+    assert state["created"]["sender_name"] == ""
+    assert state["created"]["sender_role"] == ""
     # Live-schema compliance (constraints verified 2026-08-10): the
     # CHECK'd enum gets a legal value; NOT NULL text columns never None;
     # delivery columns keep their load-bearing NULLs (a cold campaign is
@@ -142,7 +145,8 @@ def test_happy_path(client, session_cookie, state):
                    if k not in ("sender_email", "smartlead_campaign_id",
                                 "pinned_sender_id"))
     assert state["ingested"] == (1, 2)
-    assert state["objective_args"] == ("Sell the platform", "Dana", "AE")
+    # Expansion gets no sender identity any more (the mailbox carries it).
+    assert state["objective_args"] == ("Sell the platform", None, None)
     assert state["nudges"] == ["enrich"]  # ingested contacts start enriching now
 
 

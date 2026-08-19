@@ -296,8 +296,14 @@ async def preview_draft(campaign: dict, drafter: Drafter | None = None,
     target = build_preview_target(campaign, contact)
     fields = merge_fields(target)
     brief = campaign or {}
+    # A 'csv' campaign has no fallback-template path — every contact is drafted
+    # from the sheet columns — so the UI shows only the personalised email, not
+    # the "no-profile fallback" card. Computed up front so it rides on every
+    # return path (including the unconfigured/no-profile early returns).
+    csv_mode = (brief.get("enrichment_mode") or "linkedin") == "csv"
     result = {
         "from": {"name": brief.get("sender"), "role": brief.get("sender_role")},
+        "csv_mode": csv_mode,
         "source": "contact" if contact is not None else "sample",
         "sample": {
             "name": f"{target.first_name} {target.last_name or ''}".strip(),
@@ -317,9 +323,10 @@ async def preview_draft(campaign: dict, drafter: Drafter | None = None,
     missing = config.missing_draft_vars()
     if missing:
         result["error"] = (
-            "Drafting isn't configured (" + ", ".join(missing) + "), so only the "
-            "fallback template is shown — set the draft provider to preview the "
-            "personalised email."
+            "Drafting isn't configured (" + ", ".join(missing) + "), so the "
+            + ("email can't be previewed" if csv_mode
+               else "personalised email can't be shown — only the fallback template")
+            + " — set the draft provider to preview it."
         )
         return result
 
@@ -328,7 +335,6 @@ async def preview_draft(campaign: dict, drafter: Drafter | None = None,
     # a contact with a scraped profile gets the LLM email — a no-profile
     # LinkedIn contact would receive the fallback template, so the preview
     # shows that rather than fabricating an email the contact never gets.
-    csv_mode = (brief.get("enrichment_mode") or "linkedin") == "csv"
     if not csv_mode and not target.profile_data:
         result["note"] = ("This contact hasn't been scraped yet, so production "
                           "would send the fallback template below — it becomes "

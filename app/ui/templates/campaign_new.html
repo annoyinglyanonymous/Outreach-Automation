@@ -23,10 +23,9 @@
         <textarea name="objective" rows="6" required>{{ form.objective or '' }}</textarea></label>
     </div>
     <div class="col">
-      <label>Sender name
-        <span class="sub">Drafts are written and signed as this person</span>
-        <input name="sender_name" value="{{ form.sender_name or '' }}"></label>
-      <label>Sender role <input name="sender_role" value="{{ form.sender_role or '' }}"></label>
+      {# No Sender name/role fields: a contact's From name and sign-off come
+         entirely from the sending mailbox (its pool name + per-address
+         signature), so a per-campaign sender identity is redundant. #}
       {# Optional single-mailbox pin. Default (empty) rotates the From across
          the whole verified pool; picking one sends this campaign only from
          that mailbox. Editable later on the campaign page. #}

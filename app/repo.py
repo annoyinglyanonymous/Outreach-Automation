@@ -672,8 +672,10 @@ async def reset_stale_draft_claims() -> int:
 # PER-CAMPAIGN: a rotating campaign (pinned_sender_id IS NULL) needs any
 # active sender with room; a pinned campaign needs ITS one sender to be
 # active with room — so a pinned campaign whose mailbox is capped stops
-# claiming while other campaigns keep sending. A merely-capped sender stops
-# claiming (paced, retried when caps reset); an EMPTY pool / a paused pin is
+# claiming while other campaigns keep sending. daily_cap <= 0 means "no cap"
+# (the default now — the business-hours drip is the throttle, not a per-sender
+# ceiling). A merely-capped sender stops claiming (paced, retried when caps
+# reset); an EMPTY pool / a paused pin is
 # surfaced by unsendable_approved_counts. Suppressed addresses are never
 # claimed. The From is stamped on at send time; the pin is carried through
 # so emailer._send_batch knows which sender to draw for each contact.
@@ -687,11 +689,16 @@ WITH claimed AS (
        AND g.status = 'active'
        AND EXISTS (SELECT 1 FROM mailjet_senders m
                     WHERE m.active
-                      AND (m.day < current_date OR m.sent_today < m.daily_cap)
+                      AND (m.daily_cap <= 0
+                           OR m.day < current_date OR m.sent_today < m.daily_cap)
                       AND (g.pinned_sender_id IS NULL
                            OR m.id = g.pinned_sender_id))
        AND NOT EXISTS (SELECT 1 FROM suppression s
                         WHERE lower(s.email) = lower(c.email))
+       -- Optional single-campaign scope for the "send approved now" override
+       -- (emailer.send_campaign_now). NULL (the drip's normal call) claims
+       -- across every campaign exactly as before.
+       AND ($2::bigint IS NULL OR c.campaign_id = $2)
      ORDER BY c.created_at
      LIMIT $1
      FOR UPDATE OF c SKIP LOCKED
@@ -706,8 +713,10 @@ RETURNING c.id, c.email, c.first_name, c.last_name, c.company,
 """
 
 
-async def claim_email_batch(limit: int | None = None) -> list[EmailTarget]:
-    rows = await pool().fetch(CLAIM_EMAIL_SQL, limit or config.SEND_BATCH_SIZE)
+async def claim_email_batch(limit: int | None = None,
+                            campaign_id: int | None = None) -> list[EmailTarget]:
+    rows = await pool().fetch(
+        CLAIM_EMAIL_SQL, limit or config.SEND_BATCH_SIZE, campaign_id)
     return [
         EmailTarget(
             id=r["id"],
@@ -1065,9 +1074,15 @@ REVIEW_QUEUE_SQL = """
 SELECT c.id, c.email, c.first_name, c.last_name, c.company, c.title,
        c.email_subject, c.email_body, c.linkedin_note, c.linkedin_url,
        c.linkedin_status, c.review_status, c.reviewed_at, c.reviewed_by,
-       c.profile_data, c.extra_data, g.name AS campaign_name
+       c.profile_data, c.extra_data, g.name AS campaign_name,
+       -- The From (and so the sign-off) is picked at send time: a campaign
+       -- pinned to one mailbox always signs as that mailbox, so its signature
+       -- can be shown in review; a rotating campaign (pinned_sender_id IS NULL)
+       -- has no single signature to show. emailer._with_signature appends it.
+       g.pinned_sender_id, ps.signature AS pinned_signature
   FROM contacts c
   LEFT JOIN campaigns g ON g.id = c.campaign_id
+  LEFT JOIN mailjet_senders ps ON ps.id = g.pinned_sender_id
  WHERE c.linkedin_status = 'drafted'
    AND c.review_status = $1
    AND ($2::bigint IS NULL OR c.campaign_id = $2)
@@ -1090,9 +1105,14 @@ async def review_queue(review_status: str = "pending_review",
 
 
 CONTACT_DETAIL_SQL = """
-SELECT c.*, g.name AS campaign_name
+SELECT c.*, g.name AS campaign_name,
+       -- See REVIEW_QUEUE_SQL: the pinned mailbox's signature (NULL when the
+       -- campaign rotates), so the re-rendered card shows the send-time
+       -- sign-off just like the queue does.
+       g.pinned_sender_id, ps.signature AS pinned_signature
   FROM contacts c
   LEFT JOIN campaigns g ON g.id = c.campaign_id
+  LEFT JOIN mailjet_senders ps ON ps.id = g.pinned_sender_id
  WHERE c.id = $1;
 """
 
@@ -1292,14 +1312,20 @@ CAMPAIGN_FIELDS = (
     "enrichment_mode",
 )
 
-# Everything the edit form owns — i.e. CAMPAIGN_FIELDS minus
-# smartlead_campaign_id. That column has a second, non-human writer
-# (set_smartlead_campaign_id, from the Smartlead auto-setup), so a
-# full-row update let a form rendered BEFORE setup ran write its stale
-# empty value back over a freshly created id, silently making a cold
-# campaign unsendable. Creation still sets the column (as NULL).
+# Everything the edit form owns — i.e. CAMPAIGN_FIELDS minus the columns the
+# form no longer writes:
+# - smartlead_campaign_id: has a second, non-human writer
+#   (set_smartlead_campaign_id, from the Smartlead auto-setup), so a full-row
+#   update let a form rendered BEFORE setup ran write its stale empty value
+#   back over a freshly created id, silently making a cold campaign unsendable.
+# - sender_name / sender_role: the campaign no longer carries a sender
+#   identity (the From name and sign-off come from the sending mailbox), so
+#   the form dropped both fields. Excluding them here preserves any existing
+#   value instead of the (now absent) form writing NULL over the NOT-NULL
+#   sender_name. Creation still seeds both (as "").
+_CAMPAIGN_UPDATE_EXCLUDED = ("smartlead_campaign_id", "sender_name", "sender_role")
 CAMPAIGN_UPDATE_FIELDS = tuple(
-    f for f in CAMPAIGN_FIELDS if f != "smartlead_campaign_id"
+    f for f in CAMPAIGN_FIELDS if f not in _CAMPAIGN_UPDATE_EXCLUDED
 )
 
 CREATE_CAMPAIGN_SQL = f"""
@@ -1533,14 +1559,15 @@ async def sync_senders_from_mailjet(records: list[dict], default_cap: int) -> di
 # today, and count the send against it — the same FOR UPDATE SKIP LOCKED /
 # CTE shape as the contact claims, so two concurrent workers can never
 # over-send a domain's daily cap. The daily reset is folded into the
-# UPDATE (CASE on day < current_date), so no cron resets counters. Returns
-# None when the whole pool is at cap for today (the runner then paces).
+# UPDATE (CASE on day < current_date), so no cron resets counters.
+# daily_cap <= 0 = no cap (a sender with it always has room). Returns None
+# only when the whole pool is paused/empty or every capped sender is at cap.
 CLAIM_ROTATING_SENDER_SQL = """
 WITH picked AS (
     SELECT id
       FROM mailjet_senders
      WHERE active
-       AND (day < current_date OR sent_today < daily_cap)
+       AND (daily_cap <= 0 OR day < current_date OR sent_today < daily_cap)
      ORDER BY last_used_at NULLS FIRST, id
      LIMIT 1
      FOR UPDATE SKIP LOCKED
@@ -1567,9 +1594,9 @@ async def claim_rotating_sender() -> dict | None:
 # The single-mailbox counterpart to claim_rotating_sender, for a campaign
 # pinned to one sender (migration 011). Same atomic count-and-stamp shape —
 # FOR UPDATE SKIP LOCKED, the same lazy daily reset — but scoped to ONE id
-# instead of picking LRU across the pool, so the per-domain daily cap is
-# still enforced. Returns None when that sender is paused, missing, or at
-# its cap today (the runner then leaves the contact for the next window). A
+# instead of picking LRU across the pool, so a per-mailbox cap (when set) is
+# still enforced; daily_cap <= 0 means no cap. Returns None when that sender
+# is paused, missing, or (if capped) at its cap today. A
 # rejected/failed send gives the slot back via release_rotating_sender,
 # which is keyed on the same email and so serves both pick paths.
 CLAIM_PINNED_SENDER_SQL = """
@@ -1578,7 +1605,7 @@ WITH picked AS (
       FROM mailjet_senders
      WHERE id = $1
        AND active
-       AND (day < current_date OR sent_today < daily_cap)
+       AND (daily_cap <= 0 OR day < current_date OR sent_today < daily_cap)
      FOR UPDATE SKIP LOCKED
 )
 UPDATE mailjet_senders m

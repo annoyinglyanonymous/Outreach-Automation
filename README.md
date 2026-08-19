@@ -82,11 +82,14 @@ its own signed session cookie, so no JWT machinery exists here. Pages:
   campaign is sendable as soon as the pool has an active domain. The edit
   page keeps every field, and its **Sending mailbox** dropdown optionally
   pins a campaign to one mailbox — every send goes only from that sender
-  (still capped) instead of rotating the pool (migration 011). CSV upload
-  proxies to the n8n ingest webhook (`N8N_INGEST_URL`).
+  instead of rotating the pool (migration 011). It also has a **Send approved
+  now** button that drains the campaign's approved queue immediately, bypassing
+  the drip window/pacing. CSV upload proxies to the n8n ingest webhook
+  (`N8N_INGEST_URL`).
 - **Senders** — the global Mailjet From-rotation pool: add/edit/pause/delete
-  validated sending domains, each with a per-day cap. Cold sends rotate
-  least-recently-used across the active pool. The add form can pull the
+  validated sending addresses (an optional per-mailbox daily cap, off by
+  default — see the drip below). Cold sends rotate least-recently-used across
+  the active pool, one per mailbox per drip batch. The add form can pull the
   account's Mailjet-verified addresses (`GET /v3/REST/sender`), degrading to
   manual entry if Mailjet is unreachable.
 
@@ -127,7 +130,10 @@ is picked up on a later tick.
 **Approval is never automated.** The scheduler drives enrich → scrape →
 verify → draft → email, but the email stage only ever claims contacts a
 human approved in the Review page, so no unreviewed copy can reach a
-prospect. Set `SCHEDULER_STAGES` to a subset (e.g. drop `email`) to automate
+prospect. Each email tick sends just **one drip batch** inside the send
+window (see [Email sending](#email-sending-mailjet)), so the 5-minute
+interval *is* the send cadence — it never drains the whole approved queue at
+once. Set `SCHEDULER_STAGES` to a subset (e.g. drop `email`) to automate
 the upstream stages while keeping sending manual. `/stats` reports whether
 automation is on under `scheduler`.
 
@@ -279,22 +285,44 @@ truth; the review UI is unchanged) and the HTML is derived at send time.
 `consent_status` is a record-only field now; it no longer picks a vendor.
 
 The **From is rotated** across a global sender pool (`mailjet_senders`,
-migration 010): each send draws the least-recently-used active domain with
-remaining daily capacity, so no single domain carries all the volume — the
-one deliverability lever available on an ESP. Manage the pool on the
-**Senders** page. ⚠️ Mailjet is a bulk ESP whose AUP forbids cold outreach
-and whose shared IPs hurt cold deliverability — a deliberate, owner-directed
-choice, not a recommended default.
+migration 010): each send draws the least-recently-used active domain, so no
+single domain carries all the volume — the one deliverability lever available
+on an ESP. Manage the pool on the **Senders** page. ⚠️ Mailjet is a bulk ESP
+whose AUP forbids cold outreach and whose shared IPs hurt cold deliverability
+— a deliberate, owner-directed choice, not a recommended default.
+
+**Sending is a business-hours drip, not a burst** (the pacing model). One
+`emailer.run()` sends exactly **one batch — one email per active mailbox**
+(sized to `count_active_senders`, bounded by `SEND_BATCH_SIZE`) and stops; the
+scheduler tick (`SCHEDULER_INTERVAL_MINUTES`, default 5) is the cadence, so an
+approved list drains a batch at a time (~`active × 12 × 8`/day). Sends only
+inside the send window — `SEND_WINDOW_START_HOUR`..`SEND_WINDOW_END_HOUR` in
+`SEND_WINDOW_TZ` (default 9–5 `America/New_York`), weekdays unless
+`SEND_WINDOW_WEEKDAYS_ONLY=false`; outside it the run is a clean no-op
+(`emailer.within_send_window`, DST-correct via `zoneinfo` — hence the `tzdata`
+dependency). The **per-sender daily cap is off by default**: `daily_cap <= 0`
+means "no cap" in every claim, because the drip (batch size × tick × window)
+is now the throttle. Set a positive `daily_cap` on the Senders page to throttle
+one warming mailbox; migration 015 zeroes the column for the drip model.
 
 A campaign may instead be **pinned to one mailbox** (`campaigns.pinned_sender_id`,
 migration 011) — e.g. a named-person sequence where every touch must come
 from the same address. A pinned campaign draws that one sender only, via
-`claim_pinned_sender`; the pin narrows *which* sender is used but does not
-lift the per-domain daily cap, so it still sends at most `daily_cap`/day.
-The claim's capacity gate is per-campaign: a pinned mailbox at cap stops
-*that* campaign without pausing others, and a pin to a paused/deleted sender
-is surfaced as "approved but unsendable", never silently rotated back to the
-pool (only a hard-deleted sender reverts a campaign to rotation).
+`claim_pinned_sender`; the pin narrows *which* sender is used. The claim's
+capacity gate is per-campaign: a pinned mailbox that is paused/deleted (or, if
+you set one, at its `daily_cap`) stops *that* campaign without pausing others,
+and a pin to a paused/deleted sender is surfaced as "approved but unsendable",
+never silently rotated back to the pool (only a hard-deleted sender reverts a
+campaign to rotation).
+
+**Send approved now** (`POST /ui/campaigns/{id}/send-now`,
+`emailer.send_campaign_now`) is a manual override on the campaign page: it
+drains *that one campaign's* approved queue immediately, bypassing the window
+and the 5-minute pacing — for warming a mailbox or a small urgent batch. Every
+other guarantee still holds (suppression sweep, one-first-touch claim,
+allowlist/rotation, appended signature, per-send write, money-grade release);
+it is bounded by `MAX_PASSES` per click. Pin the campaign to send all from one
+mailbox.
 
 Mailjet has **no idempotency key**, so an ambiguous failure *after* the
 request left us raises `SendUncertain`: the contact is left at `'sending'`

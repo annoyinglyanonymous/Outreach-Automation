@@ -100,11 +100,31 @@ class Config:
     # uses a key/secret pair (HTTP Basic auth).
     MAILJET_API_KEY: str = os.getenv("MAILJET_API_KEY", "")
     MAILJET_SECRET_KEY: str = os.getenv("MAILJET_SECRET_KEY", "")
-    # Default daily cap for a newly-added rotation sender (migration 010) —
-    # a fresh, unwarmed domain's ramp starting point, raised per-sender over
-    # the first weeks.
-    MAILJET_SENDER_DAILY_CAP: int = _int("MAILJET_SENDER_DAILY_CAP", 25)
+    # Default daily cap for a newly-added rotation sender (migration 010).
+    # 0 = no daily cap: the business-hours drip (SEND_WINDOW_* + the 5-min
+    # scheduler tick) is the throttle now, not a per-sender ceiling. Set a
+    # positive number to cap an individual mailbox (the claim SQL treats
+    # daily_cap <= 0 as unlimited).
+    MAILJET_SENDER_DAILY_CAP: int = _int("MAILJET_SENDER_DAILY_CAP", 0)
+    # Safety ceiling on one drip batch. The email run sizes each batch to the
+    # number of active senders (one send per mailbox); this only clamps it if
+    # the pool is unexpectedly large. Also the claim_email_batch fallback.
     SEND_BATCH_SIZE: int = _int("SEND_BATCH_SIZE", 25)
+
+    # --- send window (business-hours drip) --------------------------------
+    # Cold sends drip: one batch (one email per active sender) per scheduler
+    # tick, only inside these hours in SEND_WINDOW_TZ. Off-hours the email
+    # run is a clean no-op. Pinned False in the test suite (conftest) so the
+    # wall clock never makes a test flaky; production leaves it on.
+    SEND_WINDOW_ENABLED: bool = os.getenv(
+        "SEND_WINDOW_ENABLED", "true"
+    ).strip().lower() in ("1", "true", "yes", "on")
+    SEND_WINDOW_TZ: str = os.getenv("SEND_WINDOW_TZ", "America/New_York")
+    SEND_WINDOW_START_HOUR: int = _int("SEND_WINDOW_START_HOUR", 9)   # inclusive
+    SEND_WINDOW_END_HOUR: int = _int("SEND_WINDOW_END_HOUR", 17)      # exclusive
+    SEND_WINDOW_WEEKDAYS_ONLY: bool = os.getenv(
+        "SEND_WINDOW_WEEKDAYS_ONLY", "true"
+    ).strip().lower() in ("1", "true", "yes", "on")
 
     # --- scheduler (automation) -------------------------------------------
     # Off by default: the pipeline stays fully manual until you opt in, so a

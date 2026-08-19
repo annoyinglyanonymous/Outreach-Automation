@@ -27,3 +27,8 @@ itsdangerous==2.2.0
 # In-process scheduler — triggers the queue stages on an interval so the
 # pipeline runs unattended (app/scheduler.py). Off unless SCHEDULER_ENABLED.
 apscheduler==3.11.0
+
+# IANA time-zone database for zoneinfo (the send window uses America/New_York,
+# app/emailer.py). Bundled on some platforms but absent from most Linux
+# containers — pin it so the send-window check can't ZoneInfoNotFoundError.
+tzdata==2026.3

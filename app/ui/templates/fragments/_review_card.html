@@ -8,7 +8,8 @@
    on an approved card is both confusing and a no-op. The Approved/Rejected
    tabs are an audit view, not a re-decision surface. #}
 <article class="review-card" id="contact-{{ contact.id }}">
-  {% if contact.linkedin_status == 'drafted' %}
+  {% from "fragments/_signature.html" import signature_block %}
+{% if contact.linkedin_status == 'drafted' %}
   {% set resolved = contact.review_status in ('approved', 'rejected') %}
   <div class="rc-head">
     <span class="rc-who">{{ contact.first_name }} {{ contact.last_name or '' }}</span>
@@ -32,6 +33,7 @@
       <div class="rc-fields">
         <div class="rc-subject"><span class="k">Subject</span>{{ contact.email_subject or '—' }}</div>
         <div class="rc-text"><span class="k">Body</span>{{ contact.email_body or '—' }}</div>
+        {{ signature_block(contact.pinned_sender_id, contact.pinned_signature) }}
         {% if contact.linkedin_note %}
         <div class="rc-text"><span class="k">LinkedIn note</span>{{ contact.linkedin_note }}</div>
         {% endif %}
@@ -72,6 +74,7 @@
           <label>Body
             <textarea name="email_body" rows="10">{{ contact.email_body or '' }}</textarea>
           </label>
+          {{ signature_block(contact.pinned_sender_id, contact.pinned_signature) }}
           <label>LinkedIn note
             <span class="sub">Max 300 characters{% if not contact.linkedin_url %} — none: no profile{% endif %}</span>
             <textarea name="linkedin_note" rows="4" maxlength="300">{{ contact.linkedin_note or '' }}</textarea>

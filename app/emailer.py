@@ -4,7 +4,18 @@ Mailjet is the only send provider. Every approved draft goes out through
 it, rotating its From through the global sender pool (repo.mailjet_senders)
 so no single domain carries all the cold volume — unless the campaign is
 pinned to one mailbox (repo.EmailTarget.pinned_sender_id), in which case
-every send for it draws that one sender (still capped) instead.
+every send for it draws that one sender instead.
+
+Business-hours drip — this is the pacing model, not a burst:
+
+- One run sends exactly ONE batch (one email per active mailbox, via LRU
+  rotation) and stops. The scheduler tick (SCHEDULER_INTERVAL_MINUTES,
+  default 5) is the cadence, so an approved list drains a batch at a time.
+- Sends only inside the SEND_WINDOW_* hours (default 9–5 America/New_York,
+  weekdays); outside it the run is a clean no-op (see within_send_window).
+- The per-sender daily cap is off by default (daily_cap <= 0 = unlimited);
+  the batch size + tick interval + window ARE the throttle. A positive
+  daily_cap still caps an individual mailbox if an operator sets one.
 
 Money-grade failure semantics — the business rule is at most ONE first-touch
 email per contact, ever:
@@ -24,6 +35,8 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field, replace
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from . import repo
 from .config import config
@@ -42,6 +55,7 @@ class EmailStats:
     released: int = 0
     uncertain: int = 0
     stuck_sending: int = 0
+    window_skipped: bool = False
     seconds: float = 0.0
     errors: list[str] = field(default_factory=list)
 
@@ -55,6 +69,7 @@ class EmailStats:
             "released": self.released,
             "uncertain": self.uncertain,
             "stuck_sending": self.stuck_sending,
+            "window_skipped": self.window_skipped,
             "seconds": round(self.seconds, 1),
             "errors": self.errors,
         }
@@ -103,6 +118,17 @@ async def sync_pool(sender: EmailSender | None = None) -> dict:
         log.info("sender pool synced from Mailjet: +%d enrolled, %d paused (unverified)",
                  result["inserted"], result["deactivated"])
     return {**result, "error": None}
+
+
+def within_send_window(now: datetime) -> bool:
+    """True when `now` (tz-aware, in SEND_WINDOW_TZ) falls inside the
+    business-hours send window. Weekends are excluded when
+    SEND_WINDOW_WEEKDAYS_ONLY. Pure and time-injectable so tests never depend
+    on the wall clock; the start hour is inclusive, the end hour exclusive
+    (so a batch can start at 16:59 but never at 17:00)."""
+    if config.SEND_WINDOW_WEEKDAYS_ONLY and now.weekday() >= 5:
+        return False
+    return config.SEND_WINDOW_START_HOUR <= now.hour < config.SEND_WINDOW_END_HOUR
 
 
 def _with_signature(body: str, signature: str | None) -> str:
@@ -203,11 +229,28 @@ async def _send_batch(
 
 
 async def run(sender: EmailSender | None = None,
-              max_passes: int | None = None) -> EmailStats:
+              now: datetime | None = None) -> EmailStats:
+    """Send ONE drip batch — one email per active mailbox — then stop. The
+    5-minute scheduler tick is the cadence: each run drains a single batch, so
+    an approved list goes out steadily rather than in one burst. Outside the
+    business-hours send window the run is a clean no-op (`now` is injectable so
+    tests never touch the wall clock)."""
     sender = sender if sender is not None else build_sender()
     started = time.monotonic()
     stats = EmailStats()
-    limit = max_passes or config.MAX_PASSES
+
+    # Gate on the send window first, before any DB read/write, so off-hours is
+    # a true no-op. Weekends/nights simply skip; the next in-window tick sends.
+    if config.SEND_WINDOW_ENABLED:
+        now = now or datetime.now(ZoneInfo(config.SEND_WINDOW_TZ))
+        if not within_send_window(now):
+            log.info("email: %s is outside the send window (%02d:00–%02d:00 %s%s) — skipping",
+                     now.isoformat(timespec="minutes"), config.SEND_WINDOW_START_HOUR,
+                     config.SEND_WINDOW_END_HOUR, config.SEND_WINDOW_TZ,
+                     ", weekdays only" if config.SEND_WINDOW_WEEKDAYS_ONLY else "")
+            stats.window_skipped = True
+            stats.seconds = time.monotonic() - started
+            return stats
 
     stats.stuck_sending = await repo.count_stuck_sending()
     if stats.stuck_sending:
@@ -232,21 +275,66 @@ async def run(sender: EmailSender | None = None,
     # pool in place (see sync_pool) and the run proceeds.
     await sync_pool(sender)
 
-    while stats.passes < limit:
-        targets = await repo.claim_email_batch()
-        if not targets:
-            break
+    # One batch = one send per active mailbox. Sizing the claim to the active
+    # count and drawing the least-recently-used sender per send (claim_rotating_
+    # sender) makes each mailbox send exactly once; SEND_BATCH_SIZE only clamps
+    # an unexpectedly large pool. Empty pool → nothing to rotate through.
+    active = await repo.count_active_senders()
+    if active <= 0:
+        log.info("email: no active senders — nothing to send")
+        stats.seconds = time.monotonic() - started
+        return stats
 
-        stats.passes += 1
-        stats.claimed += len(targets)
-        log.info("pass %d: claimed %d for sending", stats.passes, len(targets))
-
-        if not await _send_batch(targets, sender, stats):
-            break
-
-        if len(targets) < config.SEND_BATCH_SIZE:
-            break
+    targets = await repo.claim_email_batch(limit=min(active, config.SEND_BATCH_SIZE))
+    if targets:
+        stats.passes = 1
+        stats.claimed = len(targets)
+        log.info("drip batch: claimed %d for sending (one per active sender)",
+                 len(targets))
+        await _send_batch(targets, sender, stats)
 
     stats.seconds = time.monotonic() - started
     log.info("email run complete: %s", stats.as_dict())
+    return stats
+
+
+async def send_campaign_now(campaign_id: int,
+                            sender: EmailSender | None = None) -> EmailStats:
+    """Manual override for one campaign: send every approved-but-unsent contact
+    right now, draining the queue rather than one drip batch, and WITHOUT the
+    business-hours window (that's the point — e.g. warming a mailbox). Every
+    other guarantee still holds: the suppression sweep, the one-first-touch
+    claim, allowlist/rotation (a pinned campaign sends from its one mailbox),
+    the appended signature, and the per-send immediate write with money-grade
+    release on failure. Bounded by MAX_PASSES so a click can't run unbounded;
+    a larger campaign is drained by clicking again."""
+    sender = sender if sender is not None else build_sender()
+    started = time.monotonic()
+    stats = EmailStats()
+
+    stats.stuck_sending = await repo.count_stuck_sending()
+    stats.suppressed = await repo.sweep_suppressed()
+
+    if sender is None:
+        log.info("send-now: Mailjet not configured — nothing to send")
+        stats.seconds = time.monotonic() - started
+        return stats
+
+    await sync_pool(sender)
+
+    while stats.passes < config.MAX_PASSES:
+        targets = await repo.claim_email_batch(
+            limit=config.SEND_BATCH_SIZE, campaign_id=campaign_id)
+        if not targets:
+            break
+        stats.passes += 1
+        stats.claimed += len(targets)
+        log.info("send-now campaign %d: claimed %d", campaign_id, len(targets))
+        if not await _send_batch(targets, sender, stats):
+            break               # vendor down / pool exhausted / uncertain — stop
+        if len(targets) < config.SEND_BATCH_SIZE:
+            break               # queue drained
+
+    stats.seconds = time.monotonic() - started
+    log.info("send-now complete for campaign %d: %s", campaign_id, stats.as_dict())
     return stats

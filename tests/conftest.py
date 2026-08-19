@@ -73,8 +73,16 @@ _CONFIG_DEFAULTS = {
     # email
     "MAILJET_API_KEY": "",
     "MAILJET_SECRET_KEY": "",
-    "MAILJET_SENDER_DAILY_CAP": 25,
+    "MAILJET_SENDER_DAILY_CAP": 0,   # 0 = no cap; the drip window is the throttle
     "SEND_BATCH_SIZE": 25,
+    # Send window OFF in the suite so the wall clock never makes an emailer
+    # test flaky; window tests opt in by patching SEND_WINDOW_ENABLED True and
+    # injecting a fixed `now` (same pattern as SENDER_ALLOWED_ADDRESSES).
+    "SEND_WINDOW_ENABLED": False,
+    "SEND_WINDOW_TZ": "America/New_York",
+    "SEND_WINDOW_START_HOUR": 9,
+    "SEND_WINDOW_END_HOUR": 17,
+    "SEND_WINDOW_WEEKDAYS_ONLY": True,
     # scheduler — off, so no test can start a real background job
     "SCHEDULER_ENABLED": False,
     "SCHEDULER_INTERVAL_MINUTES": 5,

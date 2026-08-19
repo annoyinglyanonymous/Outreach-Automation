@@ -83,6 +83,14 @@ def test_list_renders_the_pool(client, session_cookie, state):
     assert "Add sender" in body
 
 
+def test_list_shows_no_cap_for_zero(client, session_cookie, state):
+    """daily_cap 0 = unlimited (the drip is the throttle): the page shows ∞,
+    not a bare 0 that would read as 'this mailbox can't send'."""
+    state["senders"] = [dict(SENDER, daily_cap=0)]
+    body = client.get("/ui/senders", cookies=session_cookie).text
+    assert "∞ (no cap)" in body
+
+
 def test_empty_pool_shows_prompt(client, session_cookie, state):
     state["senders"] = []
     body = client.get("/ui/senders", cookies=session_cookie).text

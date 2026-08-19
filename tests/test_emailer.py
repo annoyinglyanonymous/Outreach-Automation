@@ -4,12 +4,17 @@ through the sender pool, and vendor-failure release that keeps already-sent
 work. Mailjet is the only sender."""
 from __future__ import annotations
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import pytest
 
 from app import emailer, repo
 from app.config import config
 from app.providers.base import ProviderError, SendRejected, SendUncertain
 from app.repo import EmailTarget
+
+ET = ZoneInfo("America/New_York")
 
 
 def target(id=1, **overrides) -> EmailTarget:
@@ -75,6 +80,11 @@ def state(monkeypatch):
     s = {
         "claims": [],       # queue of batches for claim_email_batch
         "claim_calls": 0,
+        "claim_limits": [],  # the `limit` each claim_email_batch call got
+        "claim_campaign_ids": [],  # the `campaign_id` each claim call got
+        # active-sender count that sizes one drip batch (one send per mailbox);
+        # >0 by default so a run proceeds to claim. Window tests set it too.
+        "active_count": 10,
         "ops": [],          # interleaved send/mark operations
         "failed": [],
         "released": [],
@@ -93,9 +103,14 @@ def state(monkeypatch):
         "synced": None,     # what sync_senders_from_mailjet was called with
     }
 
-    async def claim_email_batch(limit=None):
+    async def claim_email_batch(limit=None, campaign_id=None):
         s["claim_calls"] += 1
+        s["claim_limits"].append(limit)
+        s["claim_campaign_ids"].append(campaign_id)
         return s["claims"].pop(0) if s["claims"] else []
+
+    async def count_active_senders():
+        return s["active_count"]
 
     async def mark_email_sent(cid, provider, ref):
         s["ops"].append(f"mark:{cid}:{ref}")
@@ -143,9 +158,9 @@ def state(monkeypatch):
         s["synced"] = {"records": records, "default_cap": default_cap}
         return {"inserted": len(records), "deactivated": 0}
 
-    for fn in (claim_email_batch, mark_email_sent, mark_email_failed,
-               release_email_claims, count_stuck_sending, sweep_suppressed,
-               claim_rotating_sender, claim_pinned_sender,
+    for fn in (claim_email_batch, count_active_senders, mark_email_sent,
+               mark_email_failed, release_email_claims, count_stuck_sending,
+               sweep_suppressed, claim_rotating_sender, claim_pinned_sender,
                release_rotating_sender, sync_senders_from_mailjet):
         monkeypatch.setattr(repo, fn.__name__, fn)
 
@@ -242,14 +257,52 @@ async def test_no_sender_configured_claims_nothing(state):
 
 
 @pytest.mark.asyncio
-async def test_multi_pass_drain_and_cap(state, monkeypatch):
-    monkeypatch.setattr(config, "SEND_BATCH_SIZE", 1)
-    state["claims"] = [[target(i)] for i in range(1, 6)]
+async def test_run_sends_exactly_one_batch_per_invocation(state):
+    """The drip unit is ONE batch per run — the 5-minute scheduler tick is the
+    cadence, not a drain loop. A second queued batch is left for the next tick."""
+    state["claims"] = [[target(1), target(2)], [target(3), target(4)]]
 
-    stats = await emailer.run(FakeSender(state["ops"]), max_passes=3)
+    stats = await emailer.run(FakeSender(state["ops"], ["r1", "r2"]))
 
-    assert stats.passes == 3
-    assert stats.sent == 3
+    assert state["claim_calls"] == 1     # one batch claimed, not the whole queue
+    assert stats.sent == 2
+    assert len(state["claims"]) == 1     # the second batch untouched
+
+
+@pytest.mark.asyncio
+async def test_batch_is_sized_to_the_active_sender_count(state):
+    """One send per active mailbox: the claim is sized to count_active_senders
+    (bounded by SEND_BATCH_SIZE), so a batch draws each mailbox once."""
+    state["active_count"] = 3
+    state["claims"] = [[target(1), target(2), target(3)]]
+
+    await emailer.run(FakeSender(state["ops"]))
+
+    assert state["claim_limits"] == [3]
+
+
+@pytest.mark.asyncio
+async def test_batch_is_clamped_by_send_batch_size(state, monkeypatch):
+    """SEND_BATCH_SIZE is a safety ceiling for an unexpectedly large pool."""
+    monkeypatch.setattr(config, "SEND_BATCH_SIZE", 2)
+    state["active_count"] = 50
+    state["claims"] = [[target(1)]]
+
+    await emailer.run(FakeSender(state["ops"]))
+
+    assert state["claim_limits"] == [2]
+
+
+@pytest.mark.asyncio
+async def test_no_active_senders_claims_nothing(state):
+    """An empty/all-paused pool has nothing to rotate through — claim nothing."""
+    state["active_count"] = 0
+    state["claims"] = [[target(1)]]
+
+    stats = await emailer.run(FakeSender(state["ops"]))
+
+    assert state["claim_calls"] == 0
+    assert stats.sent == 0
 
 
 def test_build_sender_returns_mailjet_when_configured(monkeypatch):
@@ -451,6 +504,120 @@ async def test_no_signature_leaves_the_body_unchanged(state):
     await emailer.run(cap)
 
     assert cap.bodies == ["B"]
+
+
+# ---- business-hours send window ---------------------------------------
+# Pure predicate reads config (conftest pins 9–17 ET, weekdays only). Dates:
+# 2026-08-19 is a Wednesday, 2026-08-22/23 a Saturday/Sunday.
+
+
+@pytest.mark.parametrize("hour, expected", [
+    (8, False),     # before the window
+    (9, True),      # inclusive start
+    (12, True),
+    (16, True),     # last full hour
+    (17, False),    # exclusive end
+    (21, False),    # after the window
+])
+def test_within_send_window_hours(hour, expected):
+    now = datetime(2026, 8, 19, hour, 0, tzinfo=ET)
+    assert emailer.within_send_window(now) is expected
+
+
+def test_within_send_window_excludes_weekends():
+    assert emailer.within_send_window(datetime(2026, 8, 22, 12, 0, tzinfo=ET)) is False
+    assert emailer.within_send_window(datetime(2026, 8, 23, 12, 0, tzinfo=ET)) is False
+
+
+def test_within_send_window_weekend_allowed_when_not_weekdays_only(monkeypatch):
+    monkeypatch.setattr(config, "SEND_WINDOW_WEEKDAYS_ONLY", False)
+    assert emailer.within_send_window(datetime(2026, 8, 22, 12, 0, tzinfo=ET)) is True
+
+
+@pytest.mark.asyncio
+async def test_run_skips_outside_the_window(state, monkeypatch):
+    """With the window enabled, an off-hours run is a clean no-op — nothing is
+    swept or claimed — and window_skipped is flagged."""
+    monkeypatch.setattr(config, "SEND_WINDOW_ENABLED", True)
+    state["claims"] = [[target(1)]]
+    now = datetime(2026, 8, 19, 20, 0, tzinfo=ET)   # 8pm ET weekday
+
+    stats = await emailer.run(FakeSender(state["ops"]), now=now)
+
+    assert stats.window_skipped is True
+    assert stats.sent == 0
+    assert state["claim_calls"] == 0
+    assert state["ops"] == []            # gated before the suppression sweep
+
+
+@pytest.mark.asyncio
+async def test_run_sends_inside_the_window(state, monkeypatch):
+    monkeypatch.setattr(config, "SEND_WINDOW_ENABLED", True)
+    state["claims"] = [[target(1)]]
+    now = datetime(2026, 8, 19, 10, 0, tzinfo=ET)   # 10am ET weekday
+
+    stats = await emailer.run(FakeSender(state["ops"], ["r1"]), now=now)
+
+    assert stats.window_skipped is False
+    assert stats.sent == 1
+
+
+# ---- send-now override (per-campaign, bypasses window + pacing) --------
+
+
+@pytest.mark.asyncio
+async def test_send_campaign_now_drains_the_campaign(state, monkeypatch):
+    """The override drains the campaign's approved queue (many batches), not
+    one drip batch, and scopes every claim to that campaign id."""
+    monkeypatch.setattr(config, "SEND_BATCH_SIZE", 2)
+    state["claims"] = [[target(1), target(2)], [target(3), target(4)]]
+
+    stats = await emailer.send_campaign_now(7, FakeSender(state["ops"],
+                                                          ["a", "b", "c", "d"]))
+
+    assert stats.sent == 4
+    assert state["claim_calls"] == 3           # two full batches, then the empty one
+    assert state["claim_campaign_ids"] == [7, 7, 7]   # every claim scoped to campaign 7
+
+
+@pytest.mark.asyncio
+async def test_send_campaign_now_ignores_the_window(state, monkeypatch):
+    """Even with the window enabled and (implicitly) off-hours, the manual
+    override sends — bypassing the window is the whole point."""
+    monkeypatch.setattr(config, "SEND_WINDOW_ENABLED", True)
+    state["claims"] = [[target(1)]]
+
+    stats = await emailer.send_campaign_now(7, FakeSender(state["ops"], ["r1"]))
+
+    assert stats.sent == 1
+    assert stats.window_skipped is False
+
+
+@pytest.mark.asyncio
+async def test_send_campaign_now_is_a_noop_without_mailjet(state):
+    """No Mailjet keys (conftest default) → build_sender() is None: sweep runs,
+    nothing is claimed or sent."""
+    state["claims"] = [[target(1)]]
+
+    stats = await emailer.send_campaign_now(7)
+
+    assert stats.sent == 0
+    assert state["claim_calls"] == 0
+    assert "sweep" in state["ops"]
+
+
+@pytest.mark.asyncio
+async def test_send_campaign_now_keeps_the_signature(state):
+    """The override goes through the same _send_batch, so the picked sender's
+    signature is still appended."""
+    cap = BodyCapturingSender()
+    state["pool"] = [{"sender_email": "a@d1.com", "sender_name": "A",
+                      "signature": "Best,\nMadhav Gupta"}]
+    state["claims"] = [[target(1)]]
+
+    await emailer.send_campaign_now(7, cap)
+
+    assert cap.bodies == ["B\n\nBest,\nMadhav Gupta"]
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,30 @@
+{# The send-time sign-off, shown READ-ONLY. The drafter is instructed to write
+   no closing; emailer._with_signature appends the SENDING address's signature
+   when the mail actually goes out (migration 014). What can be shown here
+   depends on the campaign's "Sending mailbox":
+
+     - pinned to one mailbox with a signature -> that fixed block (definite);
+     - pinned to a mailbox with no signature  -> a warning it sends unsigned;
+     - rotating (no pin)                       -> it varies per send, so we
+       show a note instead of a signature we cannot know yet.
+
+   It is never editable here — signatures are owned by the Senders page — so the
+   reviewer sees the closing without being able to (accidentally) duplicate it
+   in the body. #}
+{% macro signature_block(pinned_id, signature) %}
+{% if pinned_id %}
+  {% if signature %}
+  <div class="sig-block">
+    <span class="sig-k">Signature — appended automatically when this sends</span>
+    <div class="sig-text">{{ signature }}</div>
+  </div>
+  {% else %}
+  <p class="hint sig-note">Pinned to one mailbox that has no signature set, so this
+    email sends with no sign-off. Add one on the <a href="/ui/senders">Senders</a> page.</p>
+  {% endif %}
+{% else %}
+  <p class="hint sig-note">A signature is appended automatically when this sends, signed
+    as whichever verified mailbox the rotation picks — so it isn't part of the editable
+    draft. Signatures are managed on the <a href="/ui/senders">Senders</a> page.</p>
+{% endif %}
+{% endmacro %}

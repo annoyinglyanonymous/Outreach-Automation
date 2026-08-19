@@ -463,6 +463,16 @@ def _campaign_flashes(request: Request) -> list[dict]:
     if ingested.isdecimal():
         flashes.append({"level": "ok",
                         "text": f"{int(ingested)} contact(s) sent to ingestion."})
+    # Send-now override result (emailer.send_campaign_now via /send-now).
+    sent_now = params.get("sent_now", "")
+    if sent_now.isdecimal():
+        n = int(sent_now)
+        flashes.append({"level": "ok", "text":
+                        f"Sent {n} approved email(s) now — bypassed the drip window."}
+                       if n else
+                       {"level": "warn", "text":
+                        "Nothing sent — no approved contacts are ready, or there's no "
+                        "active sending mailbox (check the Senders page)."})
     return flashes
 
 
@@ -584,8 +594,6 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
     form = await request.form()
     name = str(form.get("name") or "").strip()
     objective = str(form.get("objective") or "").strip()
-    sender_name = str(form.get("sender_name") or "").strip() or None
-    sender_role = str(form.get("sender_role") or "").strip() or None
     pinned_sender_id = _pinned_sender_id(form.get("pinned_sender_id"))
     enrichment_mode = _enrichment_mode(form.get("enrichment_mode"))
     file = form.get("file")
@@ -596,7 +604,6 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
     def invalid(message: str):
         return _page(request, "campaign_new.html", session, "campaigns", {
             "form": {"name": name, "objective": objective,
-                     "sender_name": sender_name, "sender_role": sender_role,
                      "pinned_sender_id": pinned_sender_id,
                      "enrichment_mode": enrichment_mode},
             "error": message, "senders": senders,
@@ -607,8 +614,10 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
     if not objective:
         return invalid("Objective is required — it becomes the campaign brief.")
 
+    # No per-campaign sender identity any more — the From name and sign-off
+    # come from the sending mailbox, so the brief expansion gets no name/role.
     brief, brief_source = await campaign_brief.expand_objective(
-        objective, sender_name, sender_role)
+        objective, None, None)
 
     # Values shaped by the live campaigns schema (verified 2026-08-10):
     # free-text brief columns are NOT NULL → empty strings when unknown;
@@ -630,8 +639,8 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
         "status": "active",
         "consent_status": "cold",
         "channel_policy": "email_only",
-        "sender_name": sender_name or "",
-        "sender_role": sender_role or "",
+        # sender_name/sender_role stay "" (the CAMPAIGN_FIELDS seed) — the
+        # form no longer collects them; identity comes from the mailbox.
         # 'linkedin' (default) | 'csv' — must be a valid value, not the "" the
         # CAMPAIGN_FIELDS seed set (the column is CHECK'd + NOT NULL).
         "enrichment_mode": enrichment_mode,
@@ -690,9 +699,21 @@ async def campaign_preview(request: Request, campaign_id: int,
     drafting path as production. Falls back to a synthetic sample when the
     campaign has no contacts ingested yet."""
     check_origin(request)
-    campaign = _brief_from_form(await request.form())
+    form = await request.form()
+    campaign = _brief_from_form(form)
     contact = await repo.get_preview_contact(campaign_id)
     preview = await drafting.preview_draft(campaign, contact=contact)
+    # The signature is appended at SEND time keyed on the From, which for a
+    # pinned campaign is one known mailbox. Resolve it here (a repo lookup —
+    # kept out of drafting.preview_draft, which stays DB-free) so the preview
+    # shows the same read-only sign-off the review card does. Rotating (no pin)
+    # leaves both None and the fragment shows the "varies per send" note.
+    pinned_id = _pinned_sender_id(form.get("pinned_sender_id"))
+    preview["pinned_sender_id"] = pinned_id
+    preview["signature"] = None
+    if pinned_id is not None:
+        sender = await repo.get_sender(pinned_id)
+        preview["signature"] = sender.get("signature") if sender else None
     return templates.TemplateResponse(request, "fragments/_preview_result.html",
                                       {"preview": preview})
 
@@ -714,6 +735,22 @@ async def campaign_update(request: Request, campaign_id: int,
     if not found:
         raise HTTPException(status_code=404)
     return RedirectResponse(f"/ui/campaigns/{campaign_id}", status_code=303)
+
+
+@router.post("/campaigns/{campaign_id}/send-now")
+async def campaign_send_now(request: Request, campaign_id: int,
+                            session: Session = Depends(require_session)):
+    """Manual override: send every approved-but-unsent contact in this
+    campaign immediately, bypassing the business-hours drip + 5-minute pacing
+    (all other safeguards stay — see emailer.send_campaign_now). For warming a
+    mailbox or a small urgent batch. Redirects back with a count flash."""
+    check_origin(request)
+    campaign = await repo.get_campaign(campaign_id)
+    if campaign is None:
+        raise HTTPException(status_code=404)
+    stats = await emailer.send_campaign_now(campaign_id)
+    return RedirectResponse(
+        f"/ui/campaigns/{campaign_id}?sent_now={stats.sent}", status_code=303)
 
 
 @router.post("/campaigns/{campaign_id}/delete")

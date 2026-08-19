@@ -136,6 +136,20 @@ def test_sender_picks_return_the_signature():
     assert "m.signature" in repo.CLAIM_PINNED_SENDER_SQL
 
 
+def test_review_queries_carry_the_pinned_mailbox_signature():
+    """The review card and preview show the send-time sign-off read-only. The
+    signature lives on the SENDING mailbox and is only knowable in review when
+    the campaign is pinned to one, so both review reads LEFT JOIN that mailbox
+    and surface pinned_sender_id (rotating vs pinned) + its signature. LEFT
+    JOIN, not INNER: a rotating campaign — or a pin to a since-deleted sender —
+    must still return the contact row (the template then shows the 'varies per
+    send' note), never drop the card."""
+    for sql in (repo.REVIEW_QUEUE_SQL, repo.CONTACT_DETAIL_SQL):
+        assert "g.pinned_sender_id" in sql
+        assert "ps.signature AS pinned_signature" in sql
+        assert "LEFT JOIN mailjet_senders ps ON ps.id = g.pinned_sender_id" in sql
+
+
 def test_rotating_sender_release_floors_and_is_day_scoped():
     sql = repo.RELEASE_ROTATING_SENDER_SQL
     assert "GREATEST(sent_today - 1, 0)" in sql   # never negative
@@ -150,6 +164,25 @@ def test_email_claim_gates_on_pool_capacity_not_consent():
     assert "m.sent_today < m.daily_cap" in sql
     assert "consent_status" not in sql
     assert "sender_email" not in sql
+
+
+def test_claims_treat_daily_cap_zero_as_no_cap():
+    """The drip (business-hours batch cadence) is the throttle now, so the
+    per-sender daily cap is removed via a `daily_cap <= 0` = unlimited sentinel.
+    All three capacity gates must honour it, or a cap-0 sender would read as
+    `sent_today < 0` (never any room) and nothing would ever send."""
+    assert "m.daily_cap <= 0" in repo.CLAIM_EMAIL_SQL
+    assert "daily_cap <= 0" in repo.CLAIM_ROTATING_SENDER_SQL
+    assert "daily_cap <= 0" in repo.CLAIM_PINNED_SENDER_SQL
+
+
+def test_email_claim_can_scope_to_one_campaign():
+    """The send-now override (emailer.send_campaign_now) reuses the claim with
+    a single-campaign filter; a NULL $2 keeps the drip's cross-campaign claim
+    exactly as it was."""
+    sql = repo.CLAIM_EMAIL_SQL
+    assert "c.campaign_id = $2" in sql
+    assert "$2::bigint IS NULL" in sql
 
 
 def test_unsendable_report_names_an_empty_pool_not_a_capped_one():

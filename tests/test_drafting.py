@@ -249,6 +249,21 @@ async def test_csv_preview_personalizes_without_a_profile(monkeypatch):
     assert result["error"] is None and result["note"] is None
     assert result["personalized"]["body"] == "Preview body"
     assert result["personalized"]["linkedin_note"] is None
+    # The template hides the fallback card off this flag: csv has no fallback
+    # path, so the preview shows only the email that actually sends.
+    assert result["csv_mode"] is True
+
+
+@pytest.mark.asyncio
+async def test_preview_marks_linkedin_mode_not_csv(monkeypatch):
+    """A LinkedIn-mode preview keeps csv_mode False, so the fallback-template
+    card still renders alongside the personalized email."""
+    monkeypatch.setattr(type(config), "N8N_LLM_URL", "https://n8n.example/llm")
+    drafter = FakeDrafter([Draft("S", "Body", "note")])
+
+    result = await drafting.preview_draft(CAMPAIGN, drafter=drafter)
+
+    assert result["csv_mode"] is False
 
 
 # ---------------------------------------------------------------------

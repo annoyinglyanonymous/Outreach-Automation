@@ -3,12 +3,13 @@ with repo and providers replaced by fakes (no database, no vendors)."""
 from __future__ import annotations
 
 import re
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app import repo, runs
+from app import drafting, repo, runs
 from app.config import config
 from app.providers import supabase_auth
 from app.ui import router, routes
@@ -245,6 +246,93 @@ def test_resolved_tabs_are_readonly_without_verdict_buttons(client, session_cook
         assert 'value="approve"' not in body
         assert 'value="reject"' not in body
         assert "Subject" in body                   # content still rendered
+
+
+# ---------------------------------------------------------------------
+# send-time signature, surfaced read-only in review + preview
+# ---------------------------------------------------------------------
+
+
+def test_rotating_campaign_shows_the_send_time_signature_note(
+        client, session_cookie, calls):
+    """The signature is appended at SEND time keyed on the From (emailer
+    ._with_signature). A rotating campaign has no single From until then, so
+    the card can't show one signature — it says the sign-off is added at send
+    time and varies by mailbox. The default CONTACT fake carries no pin."""
+    body = client.get("/ui/review", cookies=session_cookie).text
+    assert "whichever verified mailbox the rotation picks" in body
+    # It must NOT fabricate a concrete signature block for a rotating campaign.
+    assert "sig-text" not in body
+
+
+def test_pinned_campaign_shows_the_mailbox_signature_read_only(
+        client, session_cookie, calls, monkeypatch):
+    """A campaign pinned to one mailbox always signs as that mailbox, so its
+    fixed signature is shown — but read-only (owned by the Senders page), never
+    as an editable field the reviewer could duplicate into the body."""
+    sig = "Warmly,\nDana Okafor\nRenegade Insurance"
+
+    async def review_queue(status="pending_review", campaign_id=None, limit=50):
+        return [dict(CONTACT, review_status=status,
+                     pinned_sender_id=7, pinned_signature=sig)]
+    monkeypatch.setattr(repo, "review_queue", review_queue)
+
+    body = client.get("/ui/review", cookies=session_cookie).text
+    assert "Dana Okafor" in body                          # the signature shows
+    assert "appended automatically when this sends" in body
+    assert "sig-text" in body
+    # Read-only: the signature is never rendered inside an editable field.
+    assert 'name="signature"' not in body
+
+
+def test_pinned_mailbox_without_a_signature_warns_of_no_signoff(
+        client, session_cookie, calls, monkeypatch):
+    """Migration 014 flags a sender missing a signature; the review card must
+    make the consequence visible — a pinned campaign whose mailbox has none
+    sends with NO sign-off, rather than silently looking fine."""
+    async def review_queue(status="pending_review", campaign_id=None, limit=50):
+        return [dict(CONTACT, review_status=status,
+                     pinned_sender_id=7, pinned_signature=None)]
+    monkeypatch.setattr(repo, "review_queue", review_queue)
+
+    body = client.get("/ui/review", cookies=session_cookie).text
+    assert "no signature set" in body
+    assert "sends with no sign-off" in body
+
+
+def test_preview_shows_the_pinned_mailbox_signature(
+        client, session_cookie, calls, monkeypatch):
+    """The preview panel shows the same read-only sign-off: for a pinned
+    campaign the route resolves that mailbox's signature (a repo lookup kept
+    out of DB-free preview_draft) and the fragment renders it under the email."""
+    sig = "Warmly,\nDana Okafor\nRenegade Insurance"
+    seen: dict = {}
+
+    async def get_preview_contact(campaign_id):
+        return None
+
+    async def get_sender(sender_id):
+        seen["get_sender"] = sender_id
+        return {"signature": sig}
+
+    async def preview_draft(campaign, contact=None):
+        return {"from": {"name": "You", "role": None}, "csv_mode": False,
+                "source": "sample",
+                "sample": {"name": "Sample", "title": "T",
+                           "company": "C", "email": "s@e.co"},
+                "template": {"subject": "S", "body": "Template body"},
+                "personalized": None, "error": None, "note": None}
+
+    monkeypatch.setattr(repo, "get_preview_contact", get_preview_contact)
+    monkeypatch.setattr(repo, "get_sender", get_sender)
+    monkeypatch.setattr(drafting, "preview_draft", preview_draft)
+
+    response = client.post("/ui/campaigns/1/preview", cookies=session_cookie,
+                           data={"pinned_sender_id": "7"})
+    assert response.status_code == 200
+    assert seen["get_sender"] == 7        # resolved the pinned mailbox
+    assert "Dana Okafor" in response.text
+    assert "sig-text" in response.text
 
 
 # ---------------------------------------------------------------------
@@ -632,6 +720,59 @@ def test_saving_a_campaign_sets_enrichment_mode(client, session_cookie, monkeypa
                     data={"name": "X", "enrichment_mode": "bogus"})
     assert r.status_code == 303
     assert seen["fields"]["enrichment_mode"] == "linkedin"
+
+
+def test_send_now_sends_and_redirects_with_count(client, session_cookie, monkeypatch):
+    """The per-campaign override calls emailer.send_campaign_now for that id and
+    redirects back with the number sent (surfaced as a flash)."""
+    seen = {}
+
+    async def get_campaign(cid):
+        return {"id": cid, "name": "Warmup"}
+
+    async def send_campaign_now(campaign_id):
+        seen["campaign_id"] = campaign_id
+        return SimpleNamespace(sent=6)
+
+    monkeypatch.setattr(repo, "get_campaign", get_campaign)
+    monkeypatch.setattr(routes.emailer, "send_campaign_now", send_campaign_now)
+
+    r = client.post("/ui/campaigns/9/send-now", cookies=session_cookie)
+
+    assert r.status_code == 303
+    assert seen["campaign_id"] == 9
+    assert r.headers["location"] == "/ui/campaigns/9?sent_now=6"
+
+
+def test_send_now_is_404_for_a_missing_campaign(client, session_cookie, monkeypatch):
+    async def get_campaign(cid):
+        return None
+    monkeypatch.setattr(repo, "get_campaign", get_campaign)
+
+    r = client.post("/ui/campaigns/99/send-now", cookies=session_cookie)
+    assert r.status_code == 404
+
+
+def test_sent_now_flash_renders_on_the_campaign_page(client, session_cookie, monkeypatch):
+    """?sent_now=N surfaces a count flash; 0 surfaces the 'nothing sent' hint."""
+    async def get_campaign(cid):
+        fields = {f: "" for f in repo.CAMPAIGN_FIELDS}
+        return dict(fields, id=cid, name="Warmup", status="active")
+
+    async def count_active_senders():
+        return 1
+
+    async def list_senders():
+        return []
+
+    monkeypatch.setattr(repo, "get_campaign", get_campaign)
+    monkeypatch.setattr(repo, "count_active_senders", count_active_senders)
+    monkeypatch.setattr(repo, "list_senders", list_senders)
+
+    hit = client.get("/ui/campaigns/1?sent_now=6", cookies=session_cookie).text
+    assert "Sent 6 approved email(s) now" in hit
+    miss = client.get("/ui/campaigns/1?sent_now=0", cookies=session_cookie).text
+    assert "Nothing sent" in miss
 
 
 def test_oversized_csv_is_refused_before_it_is_read(client, session_cookie,

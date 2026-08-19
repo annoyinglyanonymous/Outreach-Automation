@@ -6,9 +6,11 @@
   <div>
     <h1>Senders</h1>
     <p class="hint">The cold From-rotation pool — auto-synced from your Mailjet verified
-    senders. Emails rotate across the active ones least-recently-used, capped per day. Verify a
-    sending domain in Mailjet and it's enrolled here automatically; an address no longer verified
-    in Mailjet is paused. Cap and pause are the only local overrides.
+    senders. Sends go out as a business-hours drip: one email per active mailbox every few
+    minutes, 9–5 ET on weekdays, until the approved list is done — so throughput scales with how
+    many mailboxes are active. Daily cap defaults to none (∞); set a positive number to throttle
+    one mailbox. Verify a sending domain in Mailjet and it's enrolled here automatically; an
+    address no longer verified in Mailjet is paused. Cap and pause are the only local overrides.
     {{ senders | length }} sender{{ '' if (senders | length) == 1 else 's' }} in the pool.</p>
   </div>
   <div class="row-actions">
@@ -39,7 +41,7 @@
             {% if not s.signature %}<span class="sub" style="display:block">no signature — mail sends unsigned</span>{% endif %}</td>
           <td>{{ s.sender_name or '—' }}</td>
           <td class="num">{{ s.sent_today }}</td>
-          <td class="num">{{ s.daily_cap }}</td>
+          <td class="num">{{ '∞ (no cap)' if s.daily_cap == 0 else s.daily_cap }}</td>
           <td><span class="badge {{ 'active' if s.active else 'paused' }}">{{ 'active' if s.active else 'paused' }}</span></td>
           <td class="row-actions">
             <form method="post" action="/ui/senders/{{ s.id }}/toggle">
