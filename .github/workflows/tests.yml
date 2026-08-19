@@ -1,8 +1,10 @@
 name: tests
 
 on:
+  # Every branch, so both maintained versions (main = Smartlead,
+  # mailjet-* = Mailjet) run the suite on push, not just main.
   push:
-    branches: [main, master]
+    branches: ['**']
   pull_request:
 
 jobs:
