@@ -90,35 +90,27 @@ def clamp_note(note: str | None) -> str | None:
     return cut.rstrip(" ,;:.") + "."
 
 
-# The built-in default prompt: the Agency Value Calculator outreach. Used
-# whenever a campaign has no stored objective (every pre-018 campaign), so
-# existing behaviour is unchanged until an operator writes one. The one
-# load-bearing mechanic is LINK FORMATTING: the model emits a real
-# <a href="https://…"> anchor inline, which email_format.render_html_body
-# passes through un-escaped (a single strict https anchor only) and the
-# plain-text part strips to "text (url)".
+# The built-in default prompt: the Agency Value Calculator outreach, the
+# operator's text VERBATIM (2026-08-19) — copy strategy is operator-owned, so
+# edit only on their word. Used whenever a campaign has no stored objective
+# (every pre-018 campaign). The mechanical rules (blank-line paragraphs, no
+# invented details, no internal-field leaks, malformed-name backstop, anchor
+# format, no sign-off) ride in via PROMPT_SCAFFOLD, which is appended to every
+# prompt — they don't need to live here. The one load-bearing mechanic here is
+# LINK FORMATTING: the model emits a real <a href="https://…"> anchor inline,
+# which email_format.render_html_body passes through un-escaped (a single
+# strict https anchor only) and the plain-text part strips to "text (url)".
 DEFAULT_SYSTEM_PROMPT = (
-    "You write short, personalized first-touch cold emails on the sender's "
-    "behalf to independent insurance agency owners and principals. "
-    "Personalize only from the supplied prospect data, and never invent a "
-    "detail you were not given or mention how the data was obtained.\n\n"
     "Write a short cold email between 60 and 90 words. Shorter is better.\n\n"
     "Structure:\n"
-    "1. One or two sentences of personalization built on a concrete FACT from "
-    "the supplied data (producer count, book size, market, tenure, ownership), "
-    "pointed at value: what that fact means for what the agency is worth. "
-    "Never compliment or evaluate the prospect. Words like \"impressive\", "
-    "\"solid\", or \"great\" end on your opinion; end on the fact's implication "
-    "instead. Example: \"With 13 producers at Acme Insurance, you're at the "
-    "size where owners start asking what the book is actually worth.\"\n"
+    "1. One or two sentences of personalization based on the supplied data, "
+    "tied naturally to agency value, book composition, retention, or "
+    "ownership.\n"
     "2. One or two sentences pitching the Agency Value Calculator: it gives "
     "an estimated current-market valuation in about 60 seconds, no sales "
     "call required.\n"
     "3. One short closing line inviting a reply if the result raises "
     "questions.\n\n"
-    "Format the body as two or three short paragraphs separated by blank "
-    "lines — the personalization, the calculator pitch with the link, and "
-    "the closing line. Never write the whole email as one paragraph.\n\n"
     "Do not explain the full list of valuation factors. You may mention at "
     "most one factor (such as retention or carrier mix) if it fits the "
     "personalization naturally.\n\n"

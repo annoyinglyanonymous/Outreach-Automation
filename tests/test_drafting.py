@@ -182,14 +182,14 @@ def test_the_scaffold_carries_the_load_bearing_rules():
     assert "appended" in s and "signature" in s.lower()
 
 
-def test_default_prompt_bans_compliments_and_points_facts_at_value():
-    """The personalization beat must state a fact and its value implication —
-    never the sender's opinion ('impressive', 'solid'), which reads as flattery
-    and carries no information (live test-email feedback)."""
+def test_default_prompt_is_the_operators_verbatim_text():
+    """The default prompt is the operator's exact calculator prompt — copy
+    strategy is theirs, so no strategy lines are injected into it; only the
+    mechanical scaffold rides along (appended to every prompt)."""
     p = drafting.DEFAULT_SYSTEM_PROMPT
-    assert "Never compliment" in p
-    assert "impressive" in p                    # named as the anti-pattern
-    assert "what the book is actually worth" in p   # the value-pointed example
+    assert p.startswith("Write a short cold email between 60 and 90 words.")
+    assert "Never compliment" not in p          # strategy additions removed
+    assert "MECHANICAL RULES" not in p          # the scaffold is appended, not inlined
 
 
 # ---- company-name sanity guard (source-data defects) -------------------
