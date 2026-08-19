@@ -56,9 +56,13 @@ class DraftTarget:
     linkedin_url: str | None
     profile_data: dict | None
     # Campaign fields the drafter needs (offer, cta, tone, sender,
-    # audience_rationale, fallback_email_*), joined in by the claim query
-    # so the runner never issues a second lookup per contact.
+    # audience_rationale, fallback_email_*, enrichment_mode), joined in by
+    # the claim query so the runner never issues a second lookup per contact.
     campaign: dict
+    # migration 012: sheet columns captured at CSV-only ingest. NULL for the
+    # LinkedIn path; present for enrichment_mode='csv' contacts, where the
+    # drafter personalizes from it instead of a scraped profile.
+    extra_data: dict | None = None
 
 
 @dataclass
@@ -415,7 +419,7 @@ UPDATE contacts c
   LEFT JOIN campaigns g ON g.id = claimed.campaign_id
  WHERE c.id = claimed.id
 RETURNING c.id, c.email, c.first_name, c.last_name, c.company, c.title,
-          c.linkedin_url, c.profile_data,
+          c.linkedin_url, c.profile_data, c.extra_data,
           jsonb_build_object(
               'offer',                  g.offer_description,
               'cta',                    g.cta,
@@ -424,7 +428,8 @@ RETURNING c.id, c.email, c.first_name, c.last_name, c.company, c.title,
               'sender_role',            g.sender_role,
               'audience_rationale',     g.audience_rationale,
               'fallback_email_subject', g.fallback_email_subject,
-              'fallback_email_body',    g.fallback_email_body
+              'fallback_email_body',    g.fallback_email_body,
+              'enrichment_mode',        g.enrichment_mode
           ) AS campaign;
 """
 
@@ -451,22 +456,25 @@ async def claim_draft_batch(limit: int | None = None) -> list[DraftTarget]:
             linkedin_url=r["linkedin_url"],
             profile_data=_jsonb(r["profile_data"]),
             campaign=_jsonb(r["campaign"]) or {},
+            extra_data=_jsonb(r["extra_data"]),
         )
         for r in rows
     ]
 
 
 # One real contact for the edit-page preview. Read-only — it claims and
-# writes nothing (a preview must not touch pipeline state). Prefers a
-# scraped contact (profile_data present) so the personalised preview is
-# genuine rather than the fallback template, then the newest. campaign is
-# left empty; the preview overlays the on-screen (possibly unsaved) brief.
+# writes nothing (a preview must not touch pipeline state). Prefers a contact
+# with personalization data present (a scraped profile OR captured CSV
+# columns) so the personalised preview is genuine rather than the fallback
+# template, then the newest. campaign is left empty; the preview overlays the
+# on-screen (possibly unsaved) brief.
 PREVIEW_CONTACT_SQL = """
 SELECT id, email, first_name, last_name, company, title,
-       linkedin_url, profile_data
+       linkedin_url, profile_data, extra_data
   FROM contacts
  WHERE campaign_id = $1
- ORDER BY (profile_data IS NOT NULL) DESC, created_at DESC
+ ORDER BY (profile_data IS NOT NULL OR extra_data IS NOT NULL) DESC,
+          created_at DESC
  LIMIT 1;
 """
 
@@ -485,7 +493,81 @@ async def get_preview_contact(campaign_id: int) -> DraftTarget | None:
         linkedin_url=row["linkedin_url"],
         profile_data=_jsonb(row["profile_data"]),
         campaign={},
+        extra_data=_jsonb(row["extra_data"]),
     )
+
+
+# =====================================================================
+# csv-only ingest (migration 012)
+#
+# The ONLY place this repo inserts contacts. LinkedIn-mode campaigns still
+# ingest through the n8n webhook (canonical dedupe/suppression there); a
+# 'csv' campaign bypasses n8n entirely and inserts here so it can (a) capture
+# arbitrary sheet columns into extra_data and (b) land contacts straight at
+# 'ready_to_draft' — invisible to the enrich/scrape/verify claims (which key
+# off 'pending'/'enriched'/a non-null linkedin_url), picked up only by draft.
+#
+# Dedupe + suppression are done in SQL, replacing what n8n does for the other
+# path, so invariant #1 (one first-touch per contact) still holds:
+#  - DISTINCT ON (lower(email))                  -> in-batch dedupe
+#  - NOT EXISTS (campaign_id, lower(email))      -> no second row for an
+#    address already in this campaign (a re-upload can't re-add it)
+#  - NOT EXISTS suppression (same predicate as CLAIM_EMAIL_SQL) -> never draft
+#    a suppressed address (the send-time sweep is only the backstop; skipping
+#    here saves the LLM spend at 12k scale).
+# =====================================================================
+
+INSERT_CSV_CONTACTS_SQL = """
+WITH payload AS (
+    SELECT DISTINCT ON (lower(email))
+           email, first_name, last_name, company, title, extra
+      FROM json_to_recordset($2::json) AS x(
+          email text, first_name text, last_name text,
+          company text, title text, extra jsonb)
+     WHERE position('@' in email) > 0
+     ORDER BY lower(email)
+),
+filtered AS (
+    SELECT p.* FROM payload p
+     WHERE NOT EXISTS (SELECT 1 FROM contacts c
+                        WHERE c.campaign_id = $1
+                          AND lower(c.email) = lower(p.email))
+       AND NOT EXISTS (SELECT 1 FROM suppression s
+                        WHERE lower(s.email) = lower(p.email))
+),
+ins AS (
+    INSERT INTO contacts (campaign_id, email, first_name, last_name, company,
+                          title, extra_data, linkedin_status, email_status)
+    SELECT $1, email, first_name, last_name, company, title, extra,
+           'ready_to_draft', 'pending'
+      FROM filtered
+    RETURNING 1
+)
+SELECT count(*)::int AS inserted FROM ins;
+"""
+
+
+async def insert_csv_contacts(campaign_id: int, rows: list[dict]) -> dict:
+    """Direct-insert CSV-only contacts at 'ready_to_draft'. ``rows`` come from
+    csv_ingest.parse_contacts_csv(..., keep_extras=True): each has the five
+    standard fields plus an ``extra`` dict. Chunked so each INSERT transaction
+    stays short (the session pooler holds locks across statements). Sequential
+    committed chunks mean the (campaign_id, email) dedupe also catches dupes
+    that straddle two chunks of the same upload. Returns
+    ``{"received", "inserted", "skipped"}`` (skipped = dupes + suppressed)."""
+    received = len(rows)
+    if not received:
+        return {"received": 0, "inserted": 0, "skipped": 0}
+    inserted = 0
+    async with pool().acquire() as conn:
+        for start in range(0, received, config.CSV_INSERT_CHUNK):
+            chunk = rows[start:start + config.CSV_INSERT_CHUNK]
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    INSERT_CSV_CONTACTS_SQL, campaign_id, json.dumps(chunk))
+            inserted += row["inserted"]
+    return {"received": received, "inserted": inserted,
+            "skipped": received - inserted}
 
 
 # email_status only advances from 'pending': a re-draft must never
@@ -983,7 +1065,7 @@ REVIEW_QUEUE_SQL = """
 SELECT c.id, c.email, c.first_name, c.last_name, c.company, c.title,
        c.email_subject, c.email_body, c.linkedin_note, c.linkedin_url,
        c.linkedin_status, c.review_status, c.reviewed_at, c.reviewed_by,
-       c.profile_data, g.name AS campaign_name
+       c.profile_data, c.extra_data, g.name AS campaign_name
   FROM contacts c
   LEFT JOIN campaigns g ON g.id = c.campaign_id
  WHERE c.linkedin_status = 'drafted'
@@ -1002,6 +1084,7 @@ async def review_queue(review_status: str = "pending_review",
     for r in rows:
         item = dict(r)
         item["profile_data"] = _jsonb(item["profile_data"])
+        item["extra_data"] = _jsonb(item["extra_data"])
         result.append(item)
     return result
 
@@ -1020,6 +1103,7 @@ async def contact_detail(contact_id: int) -> dict | None:
         return None
     item = dict(row)
     item["profile_data"] = _jsonb(item["profile_data"])
+    item["extra_data"] = _jsonb(item.get("extra_data"))
     return item
 
 
@@ -1203,6 +1287,9 @@ CAMPAIGN_FIELDS = (
     # Not smartlead_campaign_id, so it IS in CAMPAIGN_UPDATE_FIELDS — the
     # edit form owns it.
     "pinned_sender_id",
+    # migration 012: 'linkedin' (default, full pipeline) | 'csv' (skip
+    # Apollo/Apify/verify, personalize from the sheet). Edit form owns it.
+    "enrichment_mode",
 )
 
 # Everything the edit form owns — i.e. CAMPAIGN_FIELDS minus

@@ -204,17 +204,39 @@ for the queue rather than spending an LLM call.
 
 ## Drafting (LLM)
 
-Two paths, decided per contact (requires migration 003):
+Three paths, decided per contact:
 
 - **`profile_data` present** → one LLM call producing a personalised
   email plus a LinkedIn connection note, returned as JSON. The ≤300-char
   note CHECK is enforced in code (one corrective retry, then a
   word-boundary clamp) because output schemas cannot express length.
-- **No profile** → the campaign's `fallback_email_*` template rendered
-  with `{{first_name}}`-style merge fields. No LLM call — the output is
-  identical for everyone, so generating it N times costs money and adds
+- **Campaign in `enrichment_mode = 'csv'`** (migration 012) → one LLM call
+  personalising from the contact's **captured sheet columns** (`extra_data`)
+  instead of a scraped profile, via `drafting.build_csv_prompts` (same
+  brief-based system prompt). These campaigns skip Apollo/Apify/verify
+  entirely — see "CSV-only mode" below. Email only, so no LinkedIn note.
+- **No profile, LinkedIn mode** → the campaign's `fallback_email_*` template
+  rendered with `{{first_name}}`-style merge fields. No LLM call — the output
+  is identical for everyone, so generating it N times costs money and adds
   variance for no benefit. No LinkedIn note: there is no profile to
   connect to.
+
+### CSV-only mode (skip LinkedIn, personalise from the sheet)
+
+A campaign's `enrichment_mode` (migration 012) is `'linkedin'` (default — the
+full find→scrape→verify→draft pipeline) or `'csv'`. In `'csv'` mode — meant
+for large lists (~12k) where per-contact LinkedIn enrichment isn't worth it —
+the UI ingests the sheet **directly** (`repo.insert_csv_contacts`, the only
+in-repo `INSERT INTO contacts`), bypassing the n8n webhook, capturing **every**
+sheet column into `contacts.extra_data`, and landing each contact at
+`linkedin_status = 'ready_to_draft'`. Because the enrich/scrape/verify claims
+key off `'pending'`/`'enriched'`/a non-null `linkedin_url`, those contacts are
+invisible to them and flow straight to drafting. Dedupe (in-batch +
+per-campaign) and global suppression are enforced in the insert SQL (replacing
+what n8n does for the LinkedIn path), so "at most one first-touch per contact"
+and terminal suppression both still hold. Larger caps apply
+(`CSV_ONLY_MAX_ROWS`/`CSV_ONLY_MAX_BYTES`) and the insert is chunked
+(`CSV_INSERT_CHUNK`).
 
 The vendor is a provider behind one protocol — `DRAFT_PROVIDER` selects
 it, nothing else changes:

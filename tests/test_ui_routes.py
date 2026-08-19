@@ -562,15 +562,91 @@ def test_saving_a_campaign_with_no_mailbox_rotates_the_pool(client, session_cook
         assert seen["fields"]["pinned_sender_id"] is None
 
 
+def test_upload_csv_mode_inserts_directly_and_nudges_draft(client, session_cookie,
+                                                           calls, monkeypatch):
+    """A 'csv' campaign upload inserts directly (repo.insert_csv_contacts),
+    never touches n8n, and nudges draft — the contacts land at ready_to_draft."""
+    inserted = {}
+
+    async def get_campaign(cid):
+        return {"id": cid, "enrichment_mode": "csv"}
+
+    async def insert_csv_contacts(campaign_id, rows):
+        inserted["args"] = (campaign_id, len(rows))
+        return {"received": len(rows), "inserted": len(rows), "skipped": 0}
+
+    async def n8n_ingest(cid, rows):
+        raise AssertionError("n8n must not be called for a csv campaign")
+
+    monkeypatch.setattr(repo, "get_campaign", get_campaign)
+    monkeypatch.setattr(repo, "insert_csv_contacts", insert_csv_contacts)
+    monkeypatch.setattr(routes.n8n, "ingest", n8n_ingest)
+
+    r = client.post("/ui/campaigns/3/upload", cookies=session_cookie,
+                    files={"file": ("c.csv", b"email,state\nx@y.com,TX\n", "text/csv")})
+
+    assert r.status_code == 200
+    assert inserted["args"] == (3, 1)
+    assert calls["nudges"] == ["draft"]
+
+
+def test_upload_linkedin_mode_still_uses_n8n_and_nudges_enrich(client, session_cookie,
+                                                               calls, monkeypatch):
+    ingested = {}
+
+    async def get_campaign(cid):
+        return {"id": cid, "enrichment_mode": "linkedin"}
+
+    async def n8n_ingest(cid, rows):
+        ingested["args"] = (cid, len(rows))
+        return {"ok": True}
+
+    monkeypatch.setattr(repo, "get_campaign", get_campaign)
+    monkeypatch.setattr(routes.n8n, "ingest", n8n_ingest)
+
+    r = client.post("/ui/campaigns/4/upload", cookies=session_cookie,
+                    files={"file": ("c.csv", b"email\nx@y.com\n", "text/csv")})
+
+    assert r.status_code == 200
+    assert ingested["args"] == (4, 1)
+    assert calls["nudges"] == ["enrich"]
+
+
+def test_saving_a_campaign_sets_enrichment_mode(client, session_cookie, monkeypatch):
+    """The edit form persists the mode, normalized to a CHECK-legal value
+    (anything but 'csv' -> 'linkedin', so a hand-edited post can't 500)."""
+    seen = {}
+
+    async def update_campaign(campaign_id, fields):
+        seen["fields"] = fields
+        return True
+
+    monkeypatch.setattr(repo, "update_campaign", update_campaign)
+
+    r = client.post("/ui/campaigns/5", cookies=session_cookie,
+                    data={"name": "X", "enrichment_mode": "csv"})
+    assert r.status_code == 303
+    assert seen["fields"]["enrichment_mode"] == "csv"
+
+    r = client.post("/ui/campaigns/5", cookies=session_cookie,
+                    data={"name": "X", "enrichment_mode": "bogus"})
+    assert r.status_code == 303
+    assert seen["fields"]["enrichment_mode"] == "linkedin"
+
+
 def test_oversized_csv_is_refused_before_it_is_read(client, session_cookie,
                                                     monkeypatch):
     """CSV_MAX_BYTES used to be checked inside parse_contacts_csv, i.e.
     after the whole upload had already been read and buffered."""
     monkeypatch.setattr(type(config), "CSV_MAX_BYTES", 10)
 
-    def explode(data):
+    async def fake_get_campaign(cid):
+        return {"id": cid, "enrichment_mode": "linkedin"}
+
+    def explode(*args, **kwargs):
         raise AssertionError("oversized upload must not reach the parser")
 
+    monkeypatch.setattr(repo, "get_campaign", fake_get_campaign)
     monkeypatch.setattr(routes, "parse_contacts_csv", explode)
 
     response = client.post(

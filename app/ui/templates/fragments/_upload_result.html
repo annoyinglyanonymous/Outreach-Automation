@@ -1,6 +1,10 @@
 {% if error %}
   <p class="flash error">{{ error }}</p>
   {% if detail %}<p class="hint">{{ detail }}</p>{% endif %}
+{% elif csv %}
+  <p class="flash ok">Ingested {{ csv.inserted }} of {{ csv.received }} contacts
+  {% if csv.skipped %}({{ csv.skipped }} skipped as duplicates or suppressed) {% endif %}—
+  they'll be drafted from the sheet's columns.</p>
 {% else %}
   <p class="flash ok">Sent {{ sent }} contacts to ingestion.</p>
   {% if outcome %}<pre class="payload">{{ outcome }}</pre>{% endif %}

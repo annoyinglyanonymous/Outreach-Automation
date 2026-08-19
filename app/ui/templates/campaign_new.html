@@ -42,9 +42,21 @@
           </option>
           {% endfor %}
         </select></label>
+      {# Enrichment mode. 'linkedin' runs the full find+scrape+verify pipeline;
+         'csv' skips it and personalizes each email straight from the sheet's
+         columns — best for large lists. #}
+      <label>Enrichment
+        <span class="sub">LinkedIn: find, scrape &amp; AI-verify each contact, then draft
+        (best for small, high-value lists). CSV only: skip LinkedIn and personalize each
+        email from the sheet's own columns (best for large lists like ~12k).</span>
+        <select name="enrichment_mode">
+          <option value="linkedin" {% if (form.enrichment_mode or 'linkedin') != 'csv' %}selected{% endif %}>LinkedIn — find, scrape &amp; verify (full pipeline)</option>
+          <option value="csv" {% if form.enrichment_mode == 'csv' %}selected{% endif %}>CSV only — personalize from the sheet, skip LinkedIn</option>
+        </select></label>
       <label>Contacts (CSV, optional)
         <span class="sub">Needs an email column; name, company and title are picked up
-        when present. You can also upload later from the campaign page.</span>
+        when present. In <strong>CSV only</strong> mode every other column is captured too
+        and used to personalize the email. You can also upload later from the campaign page.</span>
         <input type="file" name="file" accept=".csv,text/csv"></label>
     </div>
   </div>

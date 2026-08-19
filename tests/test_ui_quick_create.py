@@ -55,6 +55,7 @@ def state(monkeypatch):
         "campaign": dict(CAMPAIGN),
         "created": None,
         "ingested": None,
+        "csv_inserted": None,  # (campaign_id, n) when the direct CSV insert ran
         "active_senders": 0,   # rotation-pool size the edit page reads
     }
 
@@ -86,6 +87,10 @@ def state(monkeypatch):
         s["ingested"] = (cid, len(rows))
         return {"ok": True}
 
+    async def insert_csv_contacts(campaign_id, rows):
+        s["csv_inserted"] = (campaign_id, len(rows))
+        return {"received": len(rows), "inserted": len(rows), "skipped": 0}
+
     monkeypatch.setattr(routes.campaign_brief, "expand_objective", expand_objective)
     monkeypatch.setattr(routes.n8n, "ingest", ingest)
     monkeypatch.setattr(repo, "create_campaign", create_campaign)
@@ -93,6 +98,7 @@ def state(monkeypatch):
     monkeypatch.setattr(repo, "delete_campaign", delete_campaign)
     monkeypatch.setattr(repo, "count_active_senders", count_active_senders)
     monkeypatch.setattr(repo, "list_senders", list_senders)
+    monkeypatch.setattr(repo, "insert_csv_contacts", insert_csv_contacts)
 
     s["nudges"] = []
     monkeypatch.setattr(routes.runs, "nudge",
@@ -163,6 +169,33 @@ def test_no_csv_never_calls_ingest(client, session_cookie, state):
     assert response.status_code == 303
     assert state["ingested"] is None
     assert "ingest" not in response.headers["location"]
+
+
+def test_create_csv_mode_inserts_directly_and_nudges_draft(client, session_cookie, state):
+    """A 'csv' campaign bypasses n8n: contacts are inserted directly (landing
+    at ready_to_draft) and the draft stage is nudged, not enrich."""
+    response = create(client, session_cookie, enrichment_mode="csv")
+    assert response.status_code == 303
+    assert state["created"]["enrichment_mode"] == "csv"
+    assert state["csv_inserted"] == (1, 2)     # direct insert of the 2 CSV rows
+    assert state["ingested"] is None           # n8n.ingest NOT called
+    assert state["nudges"] == ["draft"]        # draft, not enrich
+
+
+def test_create_linkedin_mode_still_uses_n8n_and_nudges_enrich(client, session_cookie, state):
+    """The default mode is unchanged: n8n ingest + enrich nudge, no direct insert."""
+    response = create(client, session_cookie)   # no enrichment_mode -> linkedin
+    assert response.status_code == 303
+    assert state["created"]["enrichment_mode"] == "linkedin"
+    assert state["ingested"] == (1, 2)
+    assert state["csv_inserted"] is None
+    assert state["nudges"] == ["enrich"]
+
+
+def test_new_page_offers_the_enrichment_mode_select(client, session_cookie, state):
+    body = client.get("/ui/campaigns/new", cookies=session_cookie).text
+    assert 'name="enrichment_mode"' in body
+    assert "CSV only" in body
 
 
 def test_new_page_offers_the_sending_mailbox_dropdown(client, session_cookie, state):

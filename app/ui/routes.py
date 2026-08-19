@@ -285,10 +285,18 @@ async def review_page(request: Request, status: str = "pending_review",
 def _decorate_contact(contact: dict) -> dict:
     contact["safe_url"] = safe_linkedin_url(contact.get("linkedin_url"))
     profile = contact.get("profile_data")
-    contact["profile_pretty"] = (
-        json.dumps(profile, indent=2, ensure_ascii=False, default=str)[:4000]
-        if profile else "(no profile — template draft)"
-    )
+    extra = contact.get("extra_data")
+    if profile:
+        contact["profile_pretty"] = json.dumps(
+            profile, indent=2, ensure_ascii=False, default=str)[:4000]
+    elif extra:
+        # A CSV-only draft: personalized from the sheet columns, not a scrape.
+        contact["profile_pretty"] = (
+            "(personalized from CSV columns)\n"
+            + json.dumps(extra, indent=2, ensure_ascii=False, default=str)
+        )[:4000]
+    else:
+        contact["profile_pretty"] = "(no profile — template draft)"
     return contact
 
 
@@ -500,6 +508,13 @@ def _pinned_sender_id(value) -> int | None:
     return int(text) if text.isdecimal() else None
 
 
+def _enrichment_mode(value) -> str:
+    """The campaign's enrichment-mode choice, normalized to a CHECK-legal
+    value. Anything but an explicit 'csv' is 'linkedin' (the default, full
+    pipeline), so a blank or hand-edited post never trips the DB CHECK."""
+    return "csv" if str(value or "").strip().lower() == "csv" else "linkedin"
+
+
 async def _campaign_fields(request: Request) -> dict:
     # CAMPAIGN_UPDATE_FIELDS, not CAMPAIGN_FIELDS: smartlead_campaign_id is
     # kept out of the edit update (it is inert now that cold sends via
@@ -511,6 +526,8 @@ async def _campaign_fields(request: Request) -> dict:
     # pinned_sender_id is a bigint FK, not free text — coerce off the generic
     # string pass so asyncpg binds an int (or NULL to rotate the pool).
     fields["pinned_sender_id"] = _pinned_sender_id(form.get("pinned_sender_id"))
+    # enrichment_mode is CHECK'd — normalize so a bad post never hits the DB.
+    fields["enrichment_mode"] = _enrichment_mode(form.get("enrichment_mode"))
     return fields
 
 
@@ -531,19 +548,25 @@ def _brief_from_form(form) -> dict:
         "audience_rationale": g("audience_rationale"),
         "fallback_email_subject": g("fallback_email_subject"),
         "fallback_email_body": g("fallback_email_body"),
+        # So the preview picks the CSV vs LinkedIn drafting path (drafting
+        # .preview_draft reads this from the brief).
+        "enrichment_mode": _enrichment_mode(form.get("enrichment_mode")),
     }
 
 
-def _oversize(file: UploadFile) -> int | None:
-    """The upload's declared size when it exceeds CSV_MAX_BYTES, else None.
+def _oversize(file: UploadFile, max_bytes: int | None = None) -> int | None:
+    """The upload's declared size when it exceeds the cap, else None. The cap
+    defaults to the n8n path's CSV_MAX_BYTES; the CSV-only path passes its
+    larger CSV_ONLY_MAX_BYTES.
 
     Checked before .read() so an oversized file is refused instead of
     being buffered first. The declared size is client-supplied, so
     parse_contacts_csv still re-checks the real length as the backstop —
     this only stops us paying for the transfer.
     """
+    cap = config.CSV_MAX_BYTES if max_bytes is None else max_bytes
     declared = getattr(file, "size", None)
-    if declared is not None and declared > config.CSV_MAX_BYTES:
+    if declared is not None and declared > cap:
         return declared
     return None
 
@@ -561,6 +584,7 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
     sender_name = str(form.get("sender_name") or "").strip() or None
     sender_role = str(form.get("sender_role") or "").strip() or None
     pinned_sender_id = _pinned_sender_id(form.get("pinned_sender_id"))
+    enrichment_mode = _enrichment_mode(form.get("enrichment_mode"))
     file = form.get("file")
     # The pool for the "Sending mailbox" dropdown — fetched up front so an
     # invalid() re-render keeps it populated with the pin choice selected.
@@ -570,7 +594,8 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
         return _page(request, "campaign_new.html", session, "campaigns", {
             "form": {"name": name, "objective": objective,
                      "sender_name": sender_name, "sender_role": sender_role,
-                     "pinned_sender_id": pinned_sender_id},
+                     "pinned_sender_id": pinned_sender_id,
+                     "enrichment_mode": enrichment_mode},
             "error": message, "senders": senders,
         }, status_code=422)
 
@@ -604,6 +629,9 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
         "channel_policy": "email_only",
         "sender_name": sender_name or "",
         "sender_role": sender_role or "",
+        # 'linkedin' (default) | 'csv' — must be a valid value, not the "" the
+        # CAMPAIGN_FIELDS seed set (the column is CHECK'd + NOT NULL).
+        "enrichment_mode": enrichment_mode,
     })
     try:
         campaign_id = await repo.create_campaign(fields)
@@ -614,16 +642,31 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
 
     if isinstance(file, UploadFile) and file.filename:
         try:
-            if _oversize(file) is not None:
-                raise ValueError("file exceeds CSV_MAX_BYTES")
-            rows, _problems = parse_contacts_csv(await file.read())
-            if not rows:
-                raise ValueError("no usable rows")
-            await n8n.ingest(campaign_id, rows)
-            outcome["ingested"] = str(len(rows))
-            # Contacts just landed at 'pending' — start enrichment now
-            # instead of waiting out the scheduler tick.
-            runs.nudge("enrich")
+            cap = (config.CSV_ONLY_MAX_BYTES if enrichment_mode == "csv"
+                   else config.CSV_MAX_BYTES)
+            if _oversize(file, cap) is not None:
+                raise ValueError("file exceeds size cap")
+            data = await file.read()
+            if enrichment_mode == "csv":
+                # Direct in-repo insert (captures all columns, lands at
+                # ready_to_draft) — no n8n, no enrich/scrape/verify.
+                rows, _problems = parse_contacts_csv(
+                    data, keep_extras=True, max_bytes=cap,
+                    max_rows=config.CSV_ONLY_MAX_ROWS)
+                if not rows:
+                    raise ValueError("no usable rows")
+                res = await repo.insert_csv_contacts(campaign_id, rows)
+                outcome["ingested"] = str(res["inserted"])
+                runs.nudge("draft")
+            else:
+                rows, _problems = parse_contacts_csv(data)
+                if not rows:
+                    raise ValueError("no usable rows")
+                await n8n.ingest(campaign_id, rows)
+                outcome["ingested"] = str(len(rows))
+                # Contacts just landed at 'pending' — start enrichment now
+                # instead of waiting out the scheduler tick.
+                runs.nudge("enrich")
         except ValueError:
             outcome["ingest"] = "invalid"
         except ProviderError as exc:
@@ -696,18 +739,38 @@ async def campaign_upload(request: Request, campaign_id: int,
     if not isinstance(file, UploadFile):
         return result({"error": "No file received."}, status_code=422)
 
-    declared = _oversize(file)
+    # The campaign's mode decides the parser, cap, and ingest path.
+    campaign = await repo.get_campaign(campaign_id)
+    if campaign is None:
+        raise HTTPException(status_code=404)
+    mode = campaign.get("enrichment_mode") or "linkedin"
+    cap = config.CSV_ONLY_MAX_BYTES if mode == "csv" else config.CSV_MAX_BYTES
+
+    declared = _oversize(file, cap)
     if declared is not None:
         return result({"error": f"File is {declared} bytes; the limit is "
-                                f"{config.CSV_MAX_BYTES}."}, status_code=422)
+                                f"{cap}."}, status_code=422)
 
+    data = await file.read()
     try:
-        rows, problems = parse_contacts_csv(await file.read())
+        if mode == "csv":
+            rows, problems = parse_contacts_csv(
+                data, keep_extras=True, max_bytes=cap,
+                max_rows=config.CSV_ONLY_MAX_ROWS)
+        else:
+            rows, problems = parse_contacts_csv(data)
     except ValueError as exc:
         return result({"error": str(exc)}, status_code=422)
     if not rows:
         return result({"error": "No usable rows found.", "problems": problems},
                       status_code=422)
+
+    if mode == "csv":
+        # Direct insert: captures every column, lands at ready_to_draft
+        # (skips enrich/scrape/verify), and drafts from the sheet.
+        summary = await repo.insert_csv_contacts(campaign_id, rows)
+        runs.nudge("draft")
+        return result({"csv": summary, "problems": problems})
 
     try:
         outcome = await n8n.ingest(campaign_id, rows)

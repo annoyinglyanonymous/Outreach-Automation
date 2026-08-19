@@ -181,6 +181,70 @@ async def test_mixed_batch_splits_paths(state):
 
 
 # ---------------------------------------------------------------------
+# runner: CSV-only path (personalize from the sheet, no profile)
+# ---------------------------------------------------------------------
+
+CSV_CAMPAIGN = {**CAMPAIGN, "enrichment_mode": "csv"}
+EXTRA = {"state": "TX", "lines_of_business": "commercial P&C",
+         "notes": "Repeat buyer, renewals in Q3"}
+
+
+@pytest.mark.asyncio
+async def test_csv_mode_personalizes_from_the_sheet_without_a_profile(state):
+    """A 'csv' campaign drafts via the LLM from extra_data even with no
+    profile — where a LinkedIn campaign would fall back to the template."""
+    drafter = FakeDrafter([Draft("Subj", "Body text", "ignored note")])
+    state["claims"] = [[target(1, profile=None, campaign=CSV_CAMPAIGN, extra_data=EXTRA)]]
+
+    stats = await drafting.run(drafter)
+
+    assert len(drafter.calls) == 1                # LLM WAS called (not template)
+    _, user = drafter.calls[0]
+    assert "commercial P&C" in user               # personalizes from the sheet
+    assert stats.csv_drafted == 1
+    assert stats.template_drafted == 0 and stats.llm_drafted == 0
+    (written,) = state["written"]
+    assert written[0]["path"] == "csv"
+    assert written[0]["linkedin_note"] is None    # csv sends email only
+
+
+@pytest.mark.asyncio
+async def test_csv_mode_skips_the_note_length_retry(state):
+    """The LinkedIn note is discarded for csv, so an overlong note must NOT
+    trigger the corrective re-draft the profile path uses."""
+    drafter = FakeDrafter([Draft("S", "B", "x" * 400)])   # would retry on llm path
+    state["claims"] = [[target(1, profile=None, campaign=CSV_CAMPAIGN, extra_data=EXTRA)]]
+
+    await drafting.run(drafter)
+
+    assert len(drafter.calls) == 1                # no second call
+
+
+def test_build_csv_prompts_uses_extra_data_and_truncates(monkeypatch):
+    monkeypatch.setattr(config, "DRAFT_PROFILE_CHAR_LIMIT", 200)
+    system, user = drafting.build_csv_prompts(
+        target(profile=None, campaign=CSV_CAMPAIGN, extra_data={"blob": "x" * 10_000}))
+    assert "Renegade back-office support" in system   # shared brief-based system
+    assert len(user) < 600                             # extra_data truncated
+
+
+@pytest.mark.asyncio
+async def test_csv_preview_personalizes_without_a_profile(monkeypatch):
+    """A csv-mode preview returns a personalized email (not the 'not scraped
+    yet' note) using the sample's extra_data."""
+    # Class attr, not instance: missing_draft_vars() is a classmethod reading
+    # cls.N8N_LLM_URL (see conftest._pinned_config).
+    monkeypatch.setattr(type(config), "N8N_LLM_URL", "https://n8n.example/llm")
+    drafter = FakeDrafter([Draft("S", "Preview body", "note")])
+
+    result = await drafting.preview_draft({"enrichment_mode": "csv"}, drafter=drafter)
+
+    assert result["error"] is None and result["note"] is None
+    assert result["personalized"]["body"] == "Preview body"
+    assert result["personalized"]["linkedin_note"] is None
+
+
+# ---------------------------------------------------------------------
 # runner: note length handling
 # ---------------------------------------------------------------------
 

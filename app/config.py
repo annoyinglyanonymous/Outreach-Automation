@@ -135,6 +135,14 @@ class Config:
     # upload proxies to it rather than duplicating the atomic insert.
     N8N_INGEST_URL: str = os.getenv("N8N_INGEST_URL", "")
     CSV_MAX_BYTES: int = _int("CSV_MAX_BYTES", 2_000_000)
+    # CSV-only campaigns (enrichment_mode='csv') bypass n8n and insert
+    # directly (repo.insert_csv_contacts), so they need headroom for a ~12k
+    # sheet the n8n path's 2000-row / 2 MB caps can't hold. The chunk bounds
+    # each INSERT transaction (the session pooler holds locks across
+    # statements — see CLAUDE.md).
+    CSV_ONLY_MAX_ROWS: int = _int("CSV_ONLY_MAX_ROWS", 20_000)
+    CSV_ONLY_MAX_BYTES: int = _int("CSV_ONLY_MAX_BYTES", 20_000_000)
+    CSV_INSERT_CHUNK: int = _int("CSV_INSERT_CHUNK", 500)
 
     # --- api ------------------------------------------------------------
     # Shared secret required on the mutating endpoints.

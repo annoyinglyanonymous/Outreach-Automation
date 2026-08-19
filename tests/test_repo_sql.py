@@ -192,6 +192,43 @@ def test_unsendable_report_surfaces_a_pin_to_a_paused_mailbox():
     assert "m.id = g.pinned_sender_id" in sql
 
 
+# ---- csv-only ingest (migration 012) ---------------------------------
+
+
+def test_csv_insert_lands_contacts_ready_to_draft_pending():
+    """CSV-only contacts must arrive at 'ready_to_draft' (invisible to the
+    enrich/scrape/verify claims) with email_status 'pending' (so drafting can
+    later lift it to 'drafted')."""
+    sql = repo.INSERT_CSV_CONTACTS_SQL
+    assert "INSERT INTO contacts" in sql
+    assert "'ready_to_draft'" in sql
+    assert "'pending'" in sql
+
+
+def test_csv_insert_dedupes_and_respects_suppression():
+    """Invariant 1 (one first-touch) + invariant 3 (suppression is terminal):
+    in-batch dedupe, no second row for an address already in the campaign, and
+    suppressed addresses are never inserted (so never drafted)."""
+    sql = repo.INSERT_CSV_CONTACTS_SQL
+    assert "DISTINCT ON (lower(email))" in sql
+    assert "NOT EXISTS (SELECT 1 FROM contacts c" in sql
+    assert "NOT EXISTS (SELECT 1 FROM suppression s" in sql
+
+
+def test_draft_claim_carries_extra_data_and_mode():
+    """The drafter needs the per-contact sheet columns and the campaign's mode
+    to pick the CSV vs LinkedIn path."""
+    sql = repo.CLAIM_DRAFT_SQL
+    assert "c.extra_data" in sql
+    assert "'enrichment_mode'" in sql
+
+
+def test_enrichment_mode_is_a_campaign_field():
+    assert "enrichment_mode" in repo.CAMPAIGN_FIELDS
+    assert "enrichment_mode" in repo.CREATE_CAMPAIGN_SQL
+    assert "enrichment_mode" in repo.UPDATE_CAMPAIGN_SQL
+
+
 def test_pool_sync_auto_enrols_new_and_pauses_unverified():
     """Full auto-enrol: Mailjet's verified list drives pool membership.
     A verified address absent from the pool is INSERTed (active, default

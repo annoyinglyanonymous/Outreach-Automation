@@ -35,6 +35,7 @@ class DraftStats:
     passes: int = 0
     claimed: int = 0
     llm_drafted: int = 0
+    csv_drafted: int = 0
     template_drafted: int = 0
     refused: int = 0
     released: int = 0
@@ -47,6 +48,7 @@ class DraftStats:
             "passes": self.passes,
             "claimed": self.claimed,
             "llm_drafted": self.llm_drafted,
+            "csv_drafted": self.csv_drafted,
             "template_drafted": self.template_drafted,
             "refused": self.refused,
             "released": self.released,
@@ -181,6 +183,31 @@ def build_prompts(target: "repo.DraftTarget") -> tuple[str, str]:
     return system, user
 
 
+def build_csv_prompts(target: "repo.DraftTarget") -> tuple[str, str]:
+    """The CSV-only counterpart to build_prompts: same brief-based system
+    prompt, but the user block personalizes from the contact's captured sheet
+    columns (extra_data) instead of a scraped LinkedIn profile. Reuses
+    build_prompts for the system so the voice/rules stay identical; the
+    LinkedIn-note the shared prompt asks for is discarded by the caller (these
+    campaigns have no profile to connect to)."""
+    system, _ = build_prompts(target)
+    extra = json.dumps(target.extra_data or {}, ensure_ascii=False)
+    if len(extra) > config.DRAFT_PROFILE_CHAR_LIMIT:
+        # Same truncation rationale as the profile JSON — the useful signal
+        # serialises first and the prompt says the data may be cut off.
+        extra = extra[: config.DRAFT_PROFILE_CHAR_LIMIT]
+    user = (
+        "Prospect:\n"
+        f"- Name: {target.first_name} {target.last_name or ''}\n"
+        f"- Title: {target.title or 'unknown'}\n"
+        f"- Company: {target.company or 'unknown'}\n\n"
+        "Additional details from the uploaded list (JSON, may be truncated) — "
+        "personalize from these where they help:\n"
+        f"{extra}"
+    )
+    return system, user
+
+
 def build_drafter() -> Drafter:
     """Instantiate the configured draft vendor — a config change, not a
     code change, same rule as the enrichment provider."""
@@ -213,6 +240,14 @@ PREVIEW_SAMPLE = {
              "years": "2013–present"},
         ],
     },
+    # Sheet columns a CSV-only campaign would carry, so a 'csv'-mode preview
+    # personalizes from these (via build_csv_prompts) rather than the profile.
+    "extra_data": {
+        "state": "TX",
+        "website": "reyesinsurance.com",
+        "lines_of_business": "commercial P&C, small-business",
+        "notes": "Independent agency, ~12 years in business.",
+    },
 }
 
 
@@ -235,6 +270,7 @@ def build_preview_target(campaign: dict,
         linkedin_url="https://www.linkedin.com/in/sample",
         profile_data=PREVIEW_SAMPLE["profile_data"],
         campaign=campaign or {},
+        extra_data=PREVIEW_SAMPLE["extra_data"],
     )
 
 
@@ -283,11 +319,13 @@ async def preview_draft(campaign: dict, drafter: Drafter | None = None,
         )
         return result
 
-    # Mirror production exactly: only a contact with a scraped profile gets
-    # the LLM personalised email; a no-profile contact would receive the
-    # fallback template, so the preview shows that rather than fabricating an
-    # LLM email the contact would never actually get.
-    if not target.profile_data:
+    # Mirror production exactly (same gate as _draft_batch). A 'csv' campaign
+    # personalises from the sheet columns (no profile needed); otherwise only
+    # a contact with a scraped profile gets the LLM email — a no-profile
+    # LinkedIn contact would receive the fallback template, so the preview
+    # shows that rather than fabricating an email the contact never gets.
+    csv_mode = (brief.get("enrichment_mode") or "linkedin") == "csv"
+    if not csv_mode and not target.profile_data:
         result["note"] = ("This contact hasn't been scraped yet, so production "
                           "would send the fallback template below — it becomes "
                           "personalised once the LinkedIn profile is in.")
@@ -295,12 +333,13 @@ async def preview_draft(campaign: dict, drafter: Drafter | None = None,
 
     try:
         drafter = drafter or build_drafter()
-        system, user = build_prompts(target)
+        system, user = build_csv_prompts(target) if csv_mode else build_prompts(target)
         draft = await drafter.draft(system, user)
         result["personalized"] = {
             "subject": draft.subject,
             "body": draft.body,
-            "linkedin_note": clamp_note(draft.linkedin_note),
+            # csv campaigns send email only — there's no LinkedIn note.
+            "linkedin_note": None if csv_mode else clamp_note(draft.linkedin_note),
         }
     except DraftRefused:
         result["error"] = ("The model declined to draft this email — try "
@@ -320,9 +359,19 @@ async def _draft_batch(
     results: list[dict] = []
 
     for index, target in enumerate(targets):
-        if not target.profile_data:
+        campaign = target.campaign or {}
+        # Mode-first gate. A 'csv' campaign always personalizes from the sheet
+        # (its contacts never have a profile); otherwise a scraped profile
+        # gets the LinkedIn LLM path, and a no-profile LinkedIn contact gets
+        # the static fallback template (unchanged, no LLM).
+        if campaign.get("enrichment_mode") == "csv":
+            system, user = build_csv_prompts(target)
+            path, keep_note = "csv", False
+        elif target.profile_data:
+            system, user = build_prompts(target)
+            path, keep_note = "llm", True
+        else:
             fields = merge_fields(target)
-            campaign = target.campaign or {}
             results.append({
                 "id": target.id,
                 "email_subject": render_template(campaign.get("fallback_email_subject"), fields),
@@ -333,13 +382,12 @@ async def _draft_batch(
             stats.template_drafted += 1
             continue
 
-        system, user = build_prompts(target)
         try:
             draft = await drafter.draft(system, user)
-            if draft.linkedin_note and len(draft.linkedin_note) > NOTE_MAX_CHARS:
+            if keep_note and draft.linkedin_note and len(draft.linkedin_note) > NOTE_MAX_CHARS:
                 # One corrective retry beats silently truncating a note
                 # that will be read by a person; clamp only if the model
-                # overruns twice.
+                # overruns twice. (csv drafts discard the note — no retry.)
                 draft = await drafter.draft(
                     system,
                     user
@@ -371,10 +419,13 @@ async def _draft_batch(
             "id": target.id,
             "email_subject": draft.subject,
             "email_body": draft.body,
-            "linkedin_note": clamp_note(draft.linkedin_note),
-            "path": "llm",
+            "linkedin_note": clamp_note(draft.linkedin_note) if keep_note else None,
+            "path": path,
         })
-        stats.llm_drafted += 1
+        if path == "csv":
+            stats.csv_drafted += 1
+        else:
+            stats.llm_drafted += 1
 
     await repo.write_drafts(results)
     return True
