@@ -108,5 +108,36 @@ def nudge(stage: str) -> bool:
         return False
 
 
+def send_now(campaign_id: int) -> bool:
+    """Fire-and-forget immediate drain of ONE campaign's approved queue — the
+    'immediate' send mode's trigger on approval (emailer.send_campaign_now,
+    which bypasses the business-hours window + drip pacing).
+
+    Deliberately NOT stage-guarded like nudge(): the claim's FOR UPDATE SKIP
+    LOCKED makes a drain safe to run alongside the drip and other drains (no
+    double-send), so a second approval need not wait on the first. It shares
+    the email config gate (no keys -> no-op) and the strong-task-ref set so a
+    run isn't garbage-collected mid-flight."""
+    try:
+        if missing_config("email"):
+            return False
+        task = asyncio.get_running_loop().create_task(_send_now(campaign_id))
+        _tasks.add(task)
+        task.add_done_callback(_tasks.discard)
+        return True
+    except Exception:
+        log.exception("send_now(%d) failed", campaign_id)
+        return False
+
+
+async def _send_now(campaign_id: int) -> None:
+    try:
+        stats = await emailer.send_campaign_now(campaign_id)
+        log.info("immediate send for campaign %d finished: %s",
+                 campaign_id, stats.as_dict())
+    except Exception:
+        log.exception("immediate send for campaign %d crashed", campaign_id)
+
+
 def status() -> dict[str, bool]:
     return dict(_running)

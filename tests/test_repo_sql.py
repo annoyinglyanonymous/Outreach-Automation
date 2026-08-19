@@ -270,6 +270,18 @@ def test_enrichment_mode_is_a_campaign_field():
     assert "enrichment_mode" in repo.UPDATE_CAMPAIGN_SQL
 
 
+def test_send_mode_is_a_campaign_field_the_edit_form_owns():
+    """Per-campaign send mode (migration 016): 'batch' drip vs 'immediate'
+    drain. Create seeds it and the edit form writes it (unlike smartlead_id),
+    so it must ride in BOTH field lists and BOTH statements — and the approve
+    handler reads it via contact_send_context to route the send."""
+    assert "send_mode" in repo.CAMPAIGN_FIELDS
+    assert "send_mode" in repo.CAMPAIGN_UPDATE_FIELDS
+    assert "send_mode" in repo.CREATE_CAMPAIGN_SQL
+    assert "send_mode" in repo.UPDATE_CAMPAIGN_SQL
+    assert "g.send_mode" in repo.CONTACT_SEND_CONTEXT_SQL
+
+
 def test_pool_sync_auto_enrols_new_and_pauses_unverified():
     """Full auto-enrol: Mailjet's verified list drives pool membership.
     A verified address absent from the pool is INSERTed (active, default

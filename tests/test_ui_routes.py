@@ -82,6 +82,11 @@ def calls(monkeypatch):
     async def contact_detail(cid):
         return dict(CONTACT, id=cid)
 
+    async def contact_send_context(cid):
+        # Approve routes on the campaign's send_mode; default 'batch' so the
+        # existing approve tests keep asserting the drip nudge.
+        return {"campaign_id": 1, "send_mode": "batch"}
+
     async def enrichment_review_queue(campaign_id=None, limit=100):
         return [dict(CONTACT, linkedin_status="enriched")]
 
@@ -118,14 +123,17 @@ def calls(monkeypatch):
 
     for fn in (update_draft, set_review_status, requeue_for_redraft,
                confirm_enrichment, reject_enrichment, contact_detail,
-               enrichment_review_queue, review_queue, verification_outcomes,
-               recent_verifications, list_campaigns, list_senders,
-               review_counts, status_counts, pending_runs, recent_events):
+               contact_send_context, enrichment_review_queue, review_queue,
+               verification_outcomes, recent_verifications, list_campaigns,
+               list_senders, review_counts, status_counts, pending_runs,
+               recent_events):
         monkeypatch.setattr(repo, fn.__name__, fn)
 
-    # Record nudges instead of starting real background runs.
+    # Record nudges + immediate-sends instead of starting real background runs.
     seen["nudges"] = []
+    seen["send_now"] = []
     monkeypatch.setattr(runs, "nudge", lambda stage: seen["nudges"].append(stage) or True)
+    monkeypatch.setattr(runs, "send_now", lambda cid: seen["send_now"].append(cid) or True)
 
     return seen
 
@@ -382,8 +390,28 @@ def test_approve_saves_edits_then_sets_status(client, session_cookie, calls):
     assert calls["update_draft"] == (1, "Edited subject", "Edited body",
                                      "Short note", "tester@example.com")
     assert calls["set_review_status"] == (1, "approved", "tester@example.com")
-    # Approval opens the send gate — the email run starts immediately.
+    # A 'batch' campaign (the fixture default) feeds the business-hours drip.
     assert calls["nudges"] == ["email"]
+    assert calls["send_now"] == []          # not an immediate drain
+
+
+def test_approve_on_immediate_campaign_drains_now_not_the_drip(
+        client, session_cookie, calls, monkeypatch):
+    """An 'immediate' campaign (migration 016) drains its whole approved queue
+    at once on approval (runs.send_now -> emailer.send_campaign_now, which
+    ignores the send window), instead of feeding the business-hours drip."""
+    async def contact_send_context(cid):
+        return {"campaign_id": 42, "send_mode": "immediate"}
+    monkeypatch.setattr(repo, "contact_send_context", contact_send_context)
+
+    response = client.post("/ui/contacts/1/draft", cookies=session_cookie, data={
+        "action": "approve", "email_subject": "S", "email_body": "B",
+    })
+
+    assert response.status_code == 200
+    assert calls["set_review_status"] == (1, "approved", "tester@example.com")
+    assert calls["send_now"] == [42]        # drained this campaign now
+    assert "email" not in calls["nudges"]   # NOT the drip
 
 
 def test_reject_does_not_nudge_email(client, session_cookie, calls):
@@ -648,6 +676,56 @@ def test_saving_a_campaign_with_no_mailbox_rotates_the_pool(client, session_cook
                         data={"name": "Rotate", "pinned_sender_id": value})
         assert r.status_code == 303
         assert seen["fields"]["pinned_sender_id"] is None
+
+
+def test_campaign_edit_offers_the_send_mode_dropdown(client, session_cookie,
+                                                     monkeypatch):
+    """The edit form exposes the send mode as a select, with the campaign's
+    current choice pre-selected (here 'immediate')."""
+    async def get_campaign(campaign_id):
+        fields = {f: "" for f in repo.CAMPAIGN_FIELDS}
+        return dict(fields, id=campaign_id, name="Now", status="active",
+                    send_mode="immediate")
+
+    async def count_active_senders():
+        return 1
+
+    async def list_senders():
+        return []
+
+    monkeypatch.setattr(repo, "get_campaign", get_campaign)
+    monkeypatch.setattr(repo, "count_active_senders", count_active_senders)
+    monkeypatch.setattr(repo, "list_senders", list_senders)
+
+    body = client.get("/ui/campaigns/1", cookies=session_cookie).text
+    assert 'name="send_mode"' in body
+    assert "Send in batches" in body and "Send immediately" in body
+    assert re.search(r'value="immediate"\s+selected>', body)      # current choice
+    assert not re.search(r'value="batch"\s+selected>', body)
+
+
+def test_saving_a_campaign_persists_the_send_mode(client, session_cookie,
+                                                  monkeypatch):
+    """The chosen send mode round-trips into the UPDATE, normalized to a
+    CHECK-legal value; anything but 'immediate' falls back to 'batch' so a bad
+    post never trips the DB CHECK."""
+    seen = {}
+
+    async def update_campaign(campaign_id, fields):
+        seen["fields"] = fields
+        return True
+
+    monkeypatch.setattr(repo, "update_campaign", update_campaign)
+
+    r = client.post("/ui/campaigns/5", cookies=session_cookie,
+                    data={"name": "Now", "send_mode": "immediate"})
+    assert r.status_code == 303
+    assert seen["fields"]["send_mode"] == "immediate"
+
+    r = client.post("/ui/campaigns/5", cookies=session_cookie,
+                    data={"name": "Now", "send_mode": "garbage"})
+    assert r.status_code == 303
+    assert seen["fields"]["send_mode"] == "batch"       # normalized default
 
 
 def test_upload_csv_mode_inserts_directly_and_nudges_draft(client, session_cookie,

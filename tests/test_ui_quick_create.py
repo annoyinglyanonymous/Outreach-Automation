@@ -196,10 +196,28 @@ def test_create_linkedin_mode_still_uses_n8n_and_nudges_enrich(client, session_c
     assert state["nudges"] == ["enrich"]
 
 
+def test_send_mode_defaults_to_batch(client, session_cookie, state):
+    """No send_mode posted -> the drip default (a legal CHECK value, never '')."""
+    create(client, session_cookie)
+    assert state["created"]["send_mode"] == "batch"
+
+
+def test_send_mode_immediate_persists(client, session_cookie, state):
+    """Picking 'immediate' at create time is saved, so approval auto-sends."""
+    create(client, session_cookie, send_mode="immediate")
+    assert state["created"]["send_mode"] == "immediate"
+
+
 def test_new_page_offers_the_enrichment_mode_select(client, session_cookie, state):
     body = client.get("/ui/campaigns/new", cookies=session_cookie).text
     assert 'name="enrichment_mode"' in body
     assert "CSV only" in body
+
+
+def test_new_page_offers_the_send_mode_select(client, session_cookie, state):
+    body = client.get("/ui/campaigns/new", cookies=session_cookie).text
+    assert 'name="send_mode"' in body
+    assert "Send immediately" in body
 
 
 def test_new_page_offers_the_sending_mailbox_dropdown(client, session_cookie, state):

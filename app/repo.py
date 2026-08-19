@@ -1177,6 +1177,22 @@ async def set_review_status(contact_id: int, status: str, by: str) -> bool:
     return row is not None
 
 
+CONTACT_SEND_CONTEXT_SQL = """
+SELECT g.id AS campaign_id, g.send_mode
+  FROM contacts c
+  JOIN campaigns g ON g.id = c.campaign_id
+ WHERE c.id = $1;
+"""
+
+
+async def contact_send_context(contact_id: int) -> dict | None:
+    """The contact's campaign id + send_mode, so the approve handler can route
+    an 'immediate' campaign to an instant drain and a 'batch' one to the drip.
+    None if the contact (or its campaign) is gone."""
+    row = await pool().fetchrow(CONTACT_SEND_CONTEXT_SQL, contact_id)
+    return dict(row) if row else None
+
+
 REQUEUE_REDRAFT_SQL = """
 WITH updated AS (
     UPDATE contacts
@@ -1310,6 +1326,10 @@ CAMPAIGN_FIELDS = (
     # migration 012: 'linkedin' (default, full pipeline) | 'csv' (skip
     # Apollo/Apify/verify, personalize from the sheet). Edit form owns it.
     "enrichment_mode",
+    # migration 016: 'batch' (default, the business-hours drip) | 'immediate'
+    # (drain this campaign's approved queue the instant each contact is
+    # approved, ignoring window + pacing). Edit form owns it.
+    "send_mode",
 )
 
 # Everything the edit form owns — i.e. CAMPAIGN_FIELDS minus the columns the

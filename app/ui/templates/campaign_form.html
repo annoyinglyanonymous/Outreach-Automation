@@ -87,6 +87,20 @@
           </option>
           {% endfor %}
         </select></label>
+      {# Send mode. 'batch' = the business-hours drip (default, deliverability-
+         safe steady send); 'immediate' = the instant each contact is approved,
+         drain this campaign's whole approved queue at once, ignoring the send
+         window + pacing (runs.send_now -> emailer.send_campaign_now). Persists
+         on the campaign (repo.CAMPAIGN_UPDATE_FIELDS); a plain select. #}
+      {% set smode = (campaign.send_mode if campaign else 'batch') or 'batch' %}
+      <label>Send mode
+        <span class="sub">Batch: steady business-hours drip (recommended). Immediate:
+        send every approved contact at once, any hour — best for warmups or a small
+        urgent batch, riskier for a large cold list (deliverability).</span>
+        <select name="send_mode">
+          <option value="batch" {% if smode != 'immediate' %}selected{% endif %}>Send in batches — business-hours drip (default)</option>
+          <option value="immediate" {% if smode == 'immediate' %}selected{% endif %}>Send immediately — drain on approval, ignore the window</option>
+        </select></label>
       <label>Tone <input name="tone" value="{{ (campaign.tone or '') if campaign else '' }}"></label>
     </div>
     <div class="col">

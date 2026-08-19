@@ -41,6 +41,17 @@
           </option>
           {% endfor %}
         </select></label>
+      {# Send mode. 'batch' = the business-hours drip (default); 'immediate' =
+         drain this campaign's approved queue the moment a contact is approved,
+         ignoring the send window + pacing. Editable later on the campaign page. #}
+      <label>Send mode
+        <span class="sub">Batch: steady business-hours drip (recommended). Immediate: send
+        every approved contact at once, any hour — best for warmups or a small urgent batch,
+        riskier for a large cold list (deliverability).</span>
+        <select name="send_mode">
+          <option value="batch" {% if (form.send_mode or 'batch') != 'immediate' %}selected{% endif %}>Send in batches — business-hours drip (default)</option>
+          <option value="immediate" {% if form.send_mode == 'immediate' %}selected{% endif %}>Send immediately — drain on approval, ignore the window</option>
+        </select></label>
       {# Enrichment mode. 'linkedin' runs the full find+scrape+verify pipeline;
          'csv' skips it and personalizes each email straight from the sheet's
          columns — best for large lists. #}

@@ -344,10 +344,18 @@ async def save_draft(request: Request, contact_id: int,
         return await card("Saved, but the verdict did not apply — the contact "
                           "is being re-drafted. Refresh the page.", error=True)
     if verdict == "approved":
-        # Approval opens the send gate for this contact — start the email
-        # run now so approved mail leaves in seconds, not next tick. The
-        # gate itself is untouched: the run still claims only approved rows.
-        runs.nudge("email")
+        # Approval opens the send gate for this contact. HOW it leaves depends
+        # on the campaign's send mode (migration 016): an 'immediate' campaign
+        # drains its whole approved queue right now, ignoring the drip's window
+        # + pacing (runs.send_now -> emailer.send_campaign_now); a 'batch' one
+        # feeds the business-hours drip exactly as before. Both are best-effort
+        # background runs — the scheduler is the safety net either way, and the
+        # send gate itself is untouched (only approved rows are ever claimed).
+        ctx = await repo.contact_send_context(contact_id)
+        if ctx and ctx.get("send_mode") == "immediate":
+            runs.send_now(ctx["campaign_id"])
+        else:
+            runs.nudge("email")
     # A verdicted draft is no longer "awaiting review": collapse its card
     # to an acknowledgement and refresh the tab counts out-of-band, so the
     # reviewer keeps moving down the stack without reloading.
@@ -528,6 +536,13 @@ def _enrichment_mode(value) -> str:
     return "csv" if str(value or "").strip().lower() == "csv" else "linkedin"
 
 
+def _send_mode(value) -> str:
+    """The campaign's send-mode choice, normalized to a CHECK-legal value.
+    Anything but an explicit 'immediate' is 'batch' (the default drip), so a
+    blank or hand-edited post never trips the DB CHECK."""
+    return "immediate" if str(value or "").strip().lower() == "immediate" else "batch"
+
+
 async def _campaign_fields(request: Request) -> dict:
     # CAMPAIGN_UPDATE_FIELDS, not CAMPAIGN_FIELDS: smartlead_campaign_id is
     # kept out of the edit update (it is inert now that cold sends via
@@ -541,6 +556,8 @@ async def _campaign_fields(request: Request) -> dict:
     fields["pinned_sender_id"] = _pinned_sender_id(form.get("pinned_sender_id"))
     # enrichment_mode is CHECK'd — normalize so a bad post never hits the DB.
     fields["enrichment_mode"] = _enrichment_mode(form.get("enrichment_mode"))
+    # send_mode is CHECK'd too — same normalization (default 'batch').
+    fields["send_mode"] = _send_mode(form.get("send_mode"))
     return fields
 
 
@@ -596,6 +613,7 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
     objective = str(form.get("objective") or "").strip()
     pinned_sender_id = _pinned_sender_id(form.get("pinned_sender_id"))
     enrichment_mode = _enrichment_mode(form.get("enrichment_mode"))
+    send_mode = _send_mode(form.get("send_mode"))
     file = form.get("file")
     # The pool for the "Sending mailbox" dropdown — fetched up front so an
     # invalid() re-render keeps it populated with the pin choice selected.
@@ -605,7 +623,8 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
         return _page(request, "campaign_new.html", session, "campaigns", {
             "form": {"name": name, "objective": objective,
                      "pinned_sender_id": pinned_sender_id,
-                     "enrichment_mode": enrichment_mode},
+                     "enrichment_mode": enrichment_mode,
+                     "send_mode": send_mode},
             "error": message, "senders": senders,
         }, status_code=422)
 
@@ -644,6 +663,9 @@ async def campaign_create(request: Request, session: Session = Depends(require_s
         # 'linkedin' (default) | 'csv' — must be a valid value, not the "" the
         # CAMPAIGN_FIELDS seed set (the column is CHECK'd + NOT NULL).
         "enrichment_mode": enrichment_mode,
+        # Send mode from the form (default 'batch'); _send_mode normalizes it,
+        # since the "" the CAMPAIGN_FIELDS seed set would trip the CHECK.
+        "send_mode": send_mode,
     })
     try:
         campaign_id = await repo.create_campaign(fields)
