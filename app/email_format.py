@@ -35,6 +35,18 @@ _LINK_RE = re.compile(
 # to the prose, not the href — peel it off and leave it outside the anchor.
 _TRAILING = ".,;:!?)]}>\"'"
 
+# The ONE markup shape the body may carry: a single https hyperlink the
+# drafter embeds inline (e.g. the calculator link). Deliberately strict — only
+# an <a> with exactly an href attribute, an https URL, and plain (angle-bracket
+# free) anchor text passes; anything else is treated as ordinary text and gets
+# escaped like the rest, so the "copy can never inject arbitrary markup" rule
+# still holds. Single or double quotes accepted.
+_SAFE_ANCHOR_RE = re.compile(
+    r"""<a\s+href=(?P<q>["'])(?P<href>https://[^"'<>\s]+)(?P=q)\s*>"""
+    r"(?P<text>[^<>]{1,200})</a>",
+    re.IGNORECASE,
+)
+
 # Inline styles only (see module docstring). A neutral system font stack, a
 # comfortable line height, and per-paragraph bottom margin for the spacing
 # that a text/plain part cannot express.
@@ -69,15 +81,38 @@ def _linkify(escaped: str) -> str:
     return _LINK_RE.sub(repl, escaped)
 
 
+def anchor_to_text(text: str | None) -> str | None:
+    """Flatten any safe inline <a> the drafter wrote to plain ``text (url)`` —
+    for the text/plain part and any read-only display, where a raw tag would
+    show literally. Leaves everything else untouched."""
+    if not text:
+        return text
+    return _SAFE_ANCHOR_RE.sub(
+        lambda m: f"{m.group('text')} ({m.group('href')})", text)
+
+
 def render_html_body(text: str | None) -> str:
     """A plain-text body -> a minimal inline-styled HTML document, or ``""``
     when the body is empty (the caller then omits the HTML part rather than
-    sending an empty one)."""
+    sending an empty one). A single strict https <a> the drafter embedded is
+    preserved (see _SAFE_ANCHOR_RE); all other content is still escaped."""
     if not text or not text.strip():
         return ""
     normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    # Stash safe anchors as control-char tokens BEFORE escaping, so escaping
+    # can't neuter them and linkify won't touch them; restore as real, styled
+    # links at the end. A token (\x00A<i>\x00) survives html.escape, _linkify,
+    # and the newline->br step untouched. Anything not matching the strict
+    # anchor shape never becomes a token and is escaped like ordinary copy.
+    anchors: list[tuple[str, str]] = []
+
+    def _stash(match: re.Match) -> str:
+        anchors.append((match.group("href"), match.group("text")))
+        return f"\x00A{len(anchors) - 1}\x00"
+
+    stashed = _SAFE_ANCHOR_RE.sub(_stash, normalized)
     paragraphs = []
-    for block in _PARA_SPLIT.split(normalized):
+    for block in _PARA_SPLIT.split(stashed):
         block = block.strip("\n")
         if not block.strip():
             continue
@@ -89,4 +124,11 @@ def render_html_body(text: str | None) -> str:
         paragraphs.append(_PARAGRAPH.format(content=linked.replace("\n", "<br>\n")))
     if not paragraphs:
         return ""
-    return _WRAPPER.format(body="".join(paragraphs))
+    out = _WRAPPER.format(body="".join(paragraphs))
+    for i, (href, atext) in enumerate(anchors):
+        out = out.replace(
+            f"\x00A{i}\x00",
+            _LINK.format(href=html.escape(href, quote=True),
+                         text=html.escape(atext, quote=False)),
+        )
+    return out

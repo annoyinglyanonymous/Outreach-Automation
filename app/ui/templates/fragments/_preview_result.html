@@ -17,7 +17,7 @@
       <div class="eh-row"><span class="eh-k">To</span><span class="eh-v">{{ preview.sample.name }}{% if preview.sample.email %} &lt;{{ preview.sample.email }}&gt;{% endif %}</span></div>
       <div class="eh-subject">{{ preview.personalized.subject or '(no subject)' }}</div>
     </div>
-    <div class="email-body">{{ preview.personalized.body or '(no body)' }}</div>
+    <div class="email-body">{{ preview.personalized.body | anchor_to_text or '(no body)' }}</div>
     {{ signature_block(preview.pinned_sender_id, preview.signature) }}
   </article>
   {% if preview.personalized.linkedin_note %}
@@ -45,7 +45,7 @@
       <div class="eh-row"><span class="eh-k">To</span><span class="eh-v">{{ preview.sample.name }}{% if preview.sample.email %} &lt;{{ preview.sample.email }}&gt;{% endif %}</span></div>
       <div class="eh-subject">{{ preview.template.subject or '(no subject)' }}</div>
     </div>
-    <div class="email-body">{{ preview.template.body or '(no body)' }}</div>
+    <div class="email-body">{{ preview.template.body | anchor_to_text or '(no body)' }}</div>
     {{ signature_block(preview.pinned_sender_id, preview.signature) }}
   </article>
   {% endif %}

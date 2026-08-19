@@ -32,7 +32,7 @@
     <div class="rc-grid">
       <div class="rc-fields">
         <div class="rc-subject"><span class="k">Subject</span>{{ contact.email_subject or '—' }}</div>
-        <div class="rc-text"><span class="k">Body</span>{{ contact.email_body or '—' }}</div>
+        <div class="rc-text"><span class="k">Body</span>{{ contact.email_body | anchor_to_text or '—' }}</div>
         {{ signature_block(contact.pinned_sender_id, contact.pinned_signature) }}
         {% if contact.linkedin_note %}
         <div class="rc-text"><span class="k">LinkedIn note</span>{{ contact.linkedin_note }}</div>

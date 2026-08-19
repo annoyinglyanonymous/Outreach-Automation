@@ -29,6 +29,14 @@ def expander_returning(payload: dict, status: int = 200) -> N8nDrafter:
                       transport=httpx.MockTransport(handler))
 
 
+def test_expansion_prompt_is_not_industry_hardcoded():
+    """The brief must reflect the operator's objective, not assume insurance —
+    so a campaign about anything expands faithfully."""
+    prompt = campaign_brief.SYSTEM_PROMPT.lower()
+    assert "insurance" not in prompt
+    assert "this specific objective" in prompt
+
+
 @pytest.mark.asyncio
 async def test_happy_expansion():
     fields, source = await campaign_brief.expand_objective(

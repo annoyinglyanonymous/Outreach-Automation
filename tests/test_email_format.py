@@ -8,7 +8,7 @@ stays plain text — this only shapes the HTML alternative at send time.
 """
 from __future__ import annotations
 
-from app.email_format import render_html_body
+from app.email_format import anchor_to_text, render_html_body
 
 
 def test_blank_lines_become_separate_paragraphs():
@@ -79,3 +79,51 @@ def test_output_is_inline_styled_not_a_style_block():
     html = render_html_body("Body")
     assert "<style" not in html
     assert html.startswith("<div style=")
+
+
+# ---- safe inline anchor (the drafter embeds the calculator link) ------
+
+
+def test_a_safe_https_anchor_is_preserved_not_escaped():
+    """The drafter embeds a real <a href="https://…"> in the body; render keeps
+    it as a live, styled link (with the custom anchor text) rather than escaping
+    it to visible tag text."""
+    body = ('Curious what your book is worth? '
+            '<a href="https://renegadeinsurance.com/agency-value-calculator/'
+            '?utm_source=automation">take a quick look here</a>.')
+    html = render_html_body(body)
+    assert ('href="https://renegadeinsurance.com/agency-value-calculator/'
+            '?utm_source=automation"') in html
+    assert ">take a quick look here</a>" in html
+    assert "&lt;a" not in html            # NOT escaped into literal tag text
+
+
+def test_a_safe_anchor_href_ampersand_is_escaped_in_the_attribute():
+    html = render_html_body('<a href="https://x.com/c?a=1&b=2">go</a>')
+    assert 'href="https://x.com/c?a=1&amp;b=2"' in html   # & -> &amp; in the attr
+    assert ">go</a>" in html
+
+
+def test_a_non_https_anchor_is_escaped_not_passed_through():
+    """Only https anchors pass; an http one is treated as ordinary (untrusted)
+    copy and escaped — the original tag never becomes live markup."""
+    html = render_html_body('<a href="http://evil.example">x</a>')
+    assert "&lt;a href=" in html
+
+
+def test_an_anchor_with_extra_attributes_is_not_passed_through():
+    """A strictly href-only shape passes; anything with more (e.g. onclick) is
+    escaped, so a script attribute can never reach the recipient as markup."""
+    html = render_html_body('<a href="https://x.com" onclick="alert(1)">x</a>')
+    assert 'onclick="alert(1)">' not in html   # never a live attribute
+    assert "&lt;a href=" in html               # the original tag is escaped
+
+
+def test_anchor_to_text_flattens_to_text_and_url():
+    out = anchor_to_text('See <a href="https://x.com/calc">this page</a> now')
+    assert out == "See this page (https://x.com/calc) now"
+
+
+def test_anchor_to_text_leaves_plain_text_untouched():
+    assert anchor_to_text("no link here") == "no link here"
+    assert anchor_to_text(None) is None

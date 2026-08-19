@@ -91,83 +91,50 @@ def clamp_note(note: str | None) -> str | None:
 
 
 def build_prompts(target: "repo.DraftTarget") -> tuple[str, str]:
-    campaign = target.campaign or {}
-    brief = [
-        ("Offer", campaign.get("offer")),
-        ("Call to action", campaign.get("cta")),
-        ("Tone", campaign.get("tone")),
-        ("Sender", campaign.get("sender")),
-        ("Sender's role", campaign.get("sender_role")),
-        ("Why this audience", campaign.get("audience_rationale")),
-    ]
-    brief_lines = "\n".join(f"- {label}: {value}" for label, value in brief if value)
-
-    # Output shape (the three fields) is pinned by the provider's own
-    # format instruction, so this prompt carries only voice, personalisation
-    # and per-field rules — never an output format, which would collide.
+    # Fixed campaign prompt: the Agency Value Calculator outreach. The audience,
+    # product and link are intentionally baked in here (operator-directed) — the
+    # campaign brief no longer steers the copy. The one load-bearing mechanic is
+    # LINK FORMATTING: the model emits a real <a href="https://…"> anchor inline,
+    # which email_format.render_html_body passes through un-escaped (a single
+    # strict https anchor only) and the plain-text part strips to "text (url)".
     system = (
-        "You write personalized first-touch cold outreach to insurance agents "
-        "on the sender's behalf. Both messages must read like one busy "
-        "insurance professional writing to another. Lead data may come from "
-        "Apollo, Apify, LinkedIn, company websites, or other provided prospect "
-        "data — never mention where the data came from, or that it was sourced "
-        "or scraped.\n\n"
-        f"Campaign brief:\n{brief_lines}\n\n"
-        "Personalization:\n"
-        "- Open the email with a short, natural observation about the "
-        "prospect's current professional profile — it should sound like a real "
-        "person glanced at their profile before reaching out.\n"
-        "- Draw only on the supplied prospect data: current role, current "
-        "company or agency, insurance specialties, lines of business, market or "
-        "geography, a recent role change, agency ownership, years in the "
-        "industry, recent LinkedIn activity, company positioning, or relevant "
-        "experience.\n"
-        "- Never invent a detail that is not in the data. If the profile is "
-        "sparse, personalize from role, company, insurance focus, or location "
-        "instead.\n"
-        "- Good: \"Saw you're leading commercial lines at ABC Insurance and "
-        "working with small-business clients.\" Avoid compliments (\"impressive "
-        "background\", \"amazing profile\"), lines generic enough to fit "
-        "anyone, and repeating their whole bio.\n"
-        "\n"
-        "Email subject:\n"
-        "- Under 50 characters, discreet, professional, natural. No "
-        "promotional language, clickbait, or excessive capitalization, and no "
-        "words like \"offer\", \"deal\", or \"limited time\".\n"
-        "- Style: \"Quick question\", \"Your agency\", \"Regarding your book\", "
-        "\"Agency operations\", \"Commercial lines\".\n"
-        "\n"
-        "Email body:\n"
-        "- 60-100 words, plain text, first person. The first sentence carries "
-        "the personalized observation, then transition naturally into the "
-        "reason for reaching out.\n"
-        "- Explain the product or service in one or two sentences, focused on "
-        "the problem it solves or the practical value — no feature dumps, no "
-        "hype or buzzwords, no forced compliments, no \"I hope this finds you "
-        "well\", no emojis, nothing that sounds automated.\n"
-        "- End with a low-friction CTA that invites a reply. Follow the "
-        "campaign brief's call to action where one is given; otherwise use "
-        "something like \"Would it be worth a quick conversation?\", \"Open to "
-        "taking a look?\", or \"If this is something you're working on, reply "
-        "and I'll send the details.\" Do not ask for a 30-minute meeting in a "
-        "first email unless the brief requires it.\n"
-        "- Do NOT write any closing, sign-off, or signature — no \"Best,\" / "
-        "\"Thanks,\", no name, title, company, or contact details. End at the "
-        "call to action. A signature is appended automatically after drafting, "
-        "so anything you add would be a duplicate.\n"
-        "\n"
-        "LinkedIn connection note:\n"
-        "- Under 260 characters, no links, no hard pitch, and don't explain "
-        "the whole product. Reference one specific detail from their current "
-        "profile and keep it conversational and understated — its only job is "
-        "to make accepting the connection feel natural.\n"
-        "- Example: \"Saw you're leading commercial lines at ABC Insurance and "
-        "working with businesses in Texas. I work with insurance agencies too, "
-        "so it made sense to connect.\"\n"
-        "\n"
-        "Produce three things: the email subject, the email body, and the "
-        "LinkedIn connection note. Return only the finished copy, no "
-        "explanation."
+        "You write short, personalized first-touch cold emails on the sender's "
+        "behalf to independent insurance agency owners and principals. "
+        "Personalize only from the supplied prospect data, and never invent a "
+        "detail you were not given or mention how the data was obtained.\n\n"
+        "Write a short cold email between 60 and 90 words. Shorter is better.\n\n"
+        "Structure:\n"
+        "1. One or two sentences of personalization based on the supplied data, "
+        "tied naturally to agency value, book composition, retention, or "
+        "ownership.\n"
+        "2. One or two sentences pitching the Agency Value Calculator: it gives "
+        "an estimated current-market valuation in about 60 seconds, no sales "
+        "call required.\n"
+        "3. One short closing line inviting a reply if the result raises "
+        "questions.\n\n"
+        "Do not explain the full list of valuation factors. You may mention at "
+        "most one factor (such as retention or carrier mix) if it fits the "
+        "personalization naturally.\n\n"
+        "Use the recipient's first name.\n\n"
+        "Create one subject line with no more than 45 characters.\n\n"
+        "LINK FORMATTING\n\n"
+        "The email body will be sent as HTML. Include the calculator link "
+        "exactly once, embedded as a hyperlink inside a natural sentence using "
+        "an HTML anchor tag, like this:\n\n"
+        "If you're curious what your book is worth in today's market, "
+        "<a href=\"https://renegadeinsurance.com/agency-value-calculator/"
+        "?utm_source=automation\">take a quick look here</a>.\n\n"
+        "Never paste the raw URL as visible text. Never use markdown link "
+        "syntax like [text](url). Use only the anchor tag format shown above. "
+        "Vary the anchor text naturally between emails (examples: \"check your "
+        "agency's current value\", \"run the 60-second estimate\", \"see where "
+        "your agency stands\").\n\n"
+        "Do not use em dashes.\n"
+        "Do not use excessive punctuation.\n"
+        "Do not include bullet points.\n"
+        "Do not include any markdown formatting.\n"
+        "Do not generate the sender's signature. The signature will be added "
+        "separately by the automation."
     )
 
     profile = json.dumps(target.profile_data or {}, ensure_ascii=False)
@@ -188,12 +155,10 @@ def build_prompts(target: "repo.DraftTarget") -> tuple[str, str]:
 
 
 def build_csv_prompts(target: "repo.DraftTarget") -> tuple[str, str]:
-    """The CSV-only counterpart to build_prompts: same brief-based system
-    prompt, but the user block personalizes from the contact's captured sheet
-    columns (extra_data) instead of a scraped LinkedIn profile. Reuses
-    build_prompts for the system so the voice/rules stay identical; the
-    LinkedIn-note the shared prompt asks for is discarded by the caller (these
-    campaigns have no profile to connect to)."""
+    """The CSV-only counterpart to build_prompts: same fixed system prompt, but
+    the user block personalizes from the contact's captured sheet columns
+    (extra_data) instead of a scraped LinkedIn profile. Reuses build_prompts for
+    the system so the voice/rules stay identical."""
     system, _ = build_prompts(target)
     extra = json.dumps(target.extra_data or {}, ensure_ascii=False)
     if len(extra) > config.DRAFT_PROFILE_CHAR_LIMIT:

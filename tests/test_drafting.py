@@ -123,7 +123,17 @@ def test_system_prompt_forbids_a_closing():
     """The signature is appended at send time, so the model must NOT write its
     own closing/sign-off (else the email double-signs)."""
     system, _ = drafting.build_prompts(target(profile=PROFILE))
-    assert "appended automatically" in system.lower()
+    assert "do not generate the sender's signature" in system.lower()
+
+
+def test_system_prompt_is_the_calculator_prompt_with_an_anchor_link():
+    """The drafting prompt is the fixed Agency Value Calculator prompt, and it
+    tells the model to embed the calculator link as an HTML anchor (Option 1) —
+    which render_html_body passes through un-escaped at send time."""
+    system, _ = drafting.build_prompts(target(profile=PROFILE))
+    assert "Agency Value Calculator" in system
+    assert "agency-value-calculator" in system    # the calculator link is in the prompt
+    assert "anchor tag" in system.lower()
 
 
 def test_build_prompts_truncates_huge_profiles(monkeypatch):
@@ -162,7 +172,7 @@ async def test_profile_path_uses_the_llm(state):
 
     assert len(drafter.calls) == 1
     system, user = drafter.calls[0]
-    assert "Renegade back-office support" in system
+    assert "Agency Value Calculator" in system   # the fixed drafting prompt
     assert "Doe Insurance" in user
     assert stats.llm_drafted == 1
     (written,) = state["written"]
@@ -231,7 +241,7 @@ def test_build_csv_prompts_uses_extra_data_and_truncates(monkeypatch):
     monkeypatch.setattr(config, "DRAFT_PROFILE_CHAR_LIMIT", 200)
     system, user = drafting.build_csv_prompts(
         target(profile=None, campaign=CSV_CAMPAIGN, extra_data={"blob": "x" * 10_000}))
-    assert "Renegade back-office support" in system   # shared brief-based system
+    assert "Agency Value Calculator" in system   # shared fixed system prompt
     assert len(user) < 600                             # extra_data truncated
 
 

@@ -30,7 +30,7 @@ import logging
 import httpx
 
 from ..config import config
-from ..email_format import render_html_body
+from ..email_format import anchor_to_text, render_html_body
 from .base import ProviderError, SendRejected, SendUncertain
 
 log = logging.getLogger(__name__)
@@ -121,11 +121,12 @@ class MailjetSender:
             "From": from_block,
             "To": [{"Email": target.email}],
             "Subject": target.email_subject,
-            # Send both parts: the stored plain text as the text/plain
-            # alternative (unchanged, for text-only clients), and a formatted
-            # HTML rendering of the same copy so it lands as a real email —
-            # paragraphs, line breaks, clickable links (see email_format).
-            "TextPart": target.email_body,
+            # Send both parts: the plain-text alternative for text-only clients
+            # (any inline <a> the drafter wrote flattened to "text (url)" so it
+            # reads cleanly), and a formatted HTML rendering of the same copy so
+            # it lands as a real email — paragraphs, line breaks, clickable
+            # links, and that anchor preserved (see email_format).
+            "TextPart": anchor_to_text(target.email_body),
             # A correlation handle for the delivery webhook, NOT a dedupe
             # key — Mailjet has none (see module docstring).
             "CustomID": f"outreach-contact-{target.id}",

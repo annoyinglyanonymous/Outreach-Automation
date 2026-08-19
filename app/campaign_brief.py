@@ -36,15 +36,18 @@ GENERIC_FALLBACK_BODY = (
 )
 
 SYSTEM_PROMPT = (
-    "You write briefs for cold-email campaigns targeting independent US "
-    "insurance agents. Given a campaign objective, produce the brief a "
-    "copywriter would work from.\n\n"
+    "You write briefs for cold-email campaigns. Given a campaign objective, "
+    "produce the brief a copywriter would work from. Capture the audience, the "
+    "offer, and the goal directly from the objective — the brief must reflect "
+    "THIS specific objective. Do not add a product, audience, industry, or "
+    "claim the objective does not state, do not assume a default vertical, and "
+    "do not water it down into something generic.\n\n"
     "The fallback email is sent verbatim (after merge-field substitution) "
     "to contacts we could not research individually, so it must be short, "
-    "plain and human — no hype, no placeholders other than the merge "
-    "fields {{first_name}} and {{company}}. Do NOT include a closing, "
-    "sign-off, or signature — end at the call to action; a signature is "
-    "appended automatically.\n\n"
+    "plain and human, and true to the objective — no hype, no placeholders "
+    "other than the merge fields {{first_name}} and {{company}}. Do NOT "
+    "include a closing, sign-off, or signature — end at the call to action; a "
+    "signature is appended automatically.\n\n"
     "Respond with a single JSON object of exactly this form: "
     '{"offer_description": string, "cta": string, "tone": string, '
     '"audience_rationale": string, "fallback_email_subject": string, '
