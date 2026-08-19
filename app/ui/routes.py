@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import asyncpg
 from fastapi import Depends, HTTPException, Request
@@ -18,7 +20,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 # every upload.
 from starlette.datastructures import UploadFile
 
-from .. import campaign_brief, drafting, emailer, repo, runs
+from .. import campaign_brief, drafting, emailer, repo, runs, send_schedule
 from ..config import config
 from ..drafting import NOTE_MAX_CHARS
 from ..providers import n8n, supabase_auth
@@ -203,6 +205,56 @@ async def review_count_fragment(request: Request,
     the client parses it directly; no template needed."""
     counts = await repo.review_counts()
     return HTMLResponse(str(counts.get("pending_review", 0)))
+
+
+_TIME_FMT = "%a %b %d, %I:%M %p %Z"
+
+
+@router.get("/schedule", response_class=HTMLResponse)
+async def schedule_page(request: Request,
+                        session: Session = Depends(require_session)):
+    """The drip made visible: upcoming batches (which approved emails go in
+    each, the projected From mailbox, and an estimated send time) plus a
+    recent-sends log. Read-only — pure projection over the live queue."""
+    params = request.query_params
+    cid = int(params["campaign"]) if params.get("campaign", "").isdecimal() else None
+
+    queue = await repo.approved_unsent_queue(cid)
+    senders = await repo.active_senders_in_rotation_order()
+    recent = await repo.recent_sends(cid)
+    campaigns = await repo.list_campaigns()
+
+    # The drip only sends automatically when the scheduler is on, the email
+    # stage is in it, and the send window is enabled; otherwise batches only go
+    # out on a manual trigger, so we show groupings without times.
+    drip_active = (config.SCHEDULER_ENABLED and "email" in config.SCHEDULER_STAGES
+                   and config.SEND_WINDOW_ENABLED)
+    batch_size = min(len(senders), config.SEND_BATCH_SIZE)
+    tz = ZoneInfo(config.SEND_WINDOW_TZ)
+    now = datetime.now(tz)
+    batches = send_schedule.plan_batches(
+        queue, senders, batch_size=batch_size, now=now, drip_active=drip_active,
+        start_hour=config.SEND_WINDOW_START_HOUR,
+        end_hour=config.SEND_WINDOW_END_HOUR,
+        weekdays_only=config.SEND_WINDOW_WEEKDAYS_ONLY,
+        interval_min=config.SCHEDULER_INTERVAL_MINUTES)
+    # Format times server-side (portable strftime; times shown in the send tz).
+    for b in batches:
+        b["at_label"] = b["at"].strftime(_TIME_FMT) if b["at"] else None
+    for r in recent:
+        sent = r.get("email_sent_at")
+        r["sent_label"] = sent.astimezone(tz).strftime(_TIME_FMT) if sent else "—"
+
+    return _page(request, "schedule.html", session, "schedule", {
+        "batches": batches, "recent": recent, "senders": senders,
+        "queue_total": len(queue), "batch_size": batch_size,
+        "drip_active": drip_active, "campaigns": campaigns,
+        "selected_campaign": cid, "tz": config.SEND_WINDOW_TZ,
+        "start_hour": config.SEND_WINDOW_START_HOUR,
+        "end_hour": config.SEND_WINDOW_END_HOUR,
+        "weekdays_only": config.SEND_WINDOW_WEEKDAYS_ONLY,
+        "interval": config.SCHEDULER_INTERVAL_MINUTES,
+    })
 
 
 @router.get("/fragments/events", response_class=HTMLResponse)

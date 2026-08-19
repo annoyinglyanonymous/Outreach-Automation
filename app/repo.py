@@ -771,14 +771,21 @@ WITH updated AS (
 )
 INSERT INTO events (contact_id, channel, event_type, payload)
 SELECT id, 'email', 'email_sent',
-       json_build_object('provider', $2::text, 'ref', $3::text)::jsonb
+       json_build_object('provider', $2::text, 'ref', $3::text,
+                         'sender', $4::text)::jsonb
   FROM updated
 RETURNING contact_id;
 """
 
 
-async def mark_email_sent(contact_id: int, provider: str, ref: str) -> bool:
-    row = await pool().fetchrow(MARK_EMAIL_SENT_SQL, contact_id, provider, ref)
+async def mark_email_sent(contact_id: int, provider: str, ref: str,
+                          sender_email: str | None = None) -> bool:
+    """Records the send and logs an ``email_sent`` event. ``sender_email`` is
+    the From the rotation/pin drew — kept in the event payload so the Schedule
+    page's recent-sends log can show which mailbox each email went from (older
+    sends predate this and read as unknown)."""
+    row = await pool().fetchrow(
+        MARK_EMAIL_SENT_SQL, contact_id, provider, ref, sender_email)
     return row is not None
 
 
@@ -882,6 +889,79 @@ async def email_status_counts() -> dict[str, int]:
         "SELECT email_status, count(*)::int AS n FROM contacts GROUP BY email_status;"
     )
     return {r["email_status"]: r["n"] for r in rows}
+
+
+# =====================================================================
+# schedule view (read-only) — the drip's upcoming batches + a sent log.
+# =====================================================================
+
+# The approved-but-unsent queue in the exact order the email claim takes it
+# (created_at), so the Schedule page can project it into batches. Mirrors
+# CLAIM_EMAIL_SQL's sendable predicate MINUS the sender-capacity EXISTS: an
+# empty/at-cap pool is surfaced on the page as "nothing will send", not by
+# hiding rows here. pinned_sender_id rides along so the forecast can show a
+# pinned campaign sending from its one mailbox.
+APPROVED_UNSENT_SQL = """
+SELECT c.id, c.email, c.first_name, c.last_name, c.company,
+       c.campaign_id, g.name AS campaign_name, g.pinned_sender_id
+  FROM contacts c
+  JOIN campaigns g ON g.id = c.campaign_id
+ WHERE c.email_status = 'drafted'
+   AND c.review_status = 'approved'
+   AND g.status = 'active'
+   AND NOT EXISTS (SELECT 1 FROM suppression s
+                    WHERE lower(s.email) = lower(c.email))
+   AND ($1::bigint IS NULL OR c.campaign_id = $1)
+ ORDER BY c.created_at
+ LIMIT $2;
+"""
+
+
+async def approved_unsent_queue(campaign_id: int | None = None,
+                                limit: int = 500) -> list[dict]:
+    rows = await pool().fetch(APPROVED_UNSENT_SQL, campaign_id, limit)
+    return [dict(r) for r in rows]
+
+
+# Recently-sent contacts, newest first, with the From mailbox pulled from the
+# latest email_sent event (mark_email_sent now records it; older sends read as
+# NULL). LATERAL so it's one row per contact even if re-logged.
+RECENT_SENDS_SQL = """
+SELECT c.id, c.email, c.first_name, c.last_name, c.company, c.email_sent_at,
+       g.name AS campaign_name,
+       e.payload->>'sender' AS sender_email
+  FROM contacts c
+  JOIN campaigns g ON g.id = c.campaign_id
+  LEFT JOIN LATERAL (
+      SELECT payload FROM events ev
+       WHERE ev.contact_id = c.id AND ev.event_type = 'email_sent'
+       ORDER BY ev.id DESC LIMIT 1) e ON true
+ WHERE c.email_status = 'sent_email'
+   AND ($1::bigint IS NULL OR c.campaign_id = $1)
+ ORDER BY c.email_sent_at DESC NULLS LAST
+ LIMIT $2;
+"""
+
+
+async def recent_sends(campaign_id: int | None = None,
+                       limit: int = 100) -> list[dict]:
+    rows = await pool().fetch(RECENT_SENDS_SQL, campaign_id, limit)
+    return [dict(r) for r in rows]
+
+
+# Active senders in the rotation order the pick uses (LRU, last_used_at NULLS
+# FIRST) — so the forecast can project which mailbox each batch slot draws.
+ACTIVE_SENDERS_ROTATION_SQL = """
+SELECT id, sender_email, sender_name
+  FROM mailjet_senders
+ WHERE active
+ ORDER BY last_used_at NULLS FIRST, id;
+"""
+
+
+async def active_senders_in_rotation_order() -> list[dict]:
+    rows = await pool().fetch(ACTIVE_SENDERS_ROTATION_SQL)
+    return [dict(r) for r in rows]
 
 
 # =====================================================================

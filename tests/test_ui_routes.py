@@ -800,6 +800,42 @@ def test_saving_a_campaign_sets_enrichment_mode(client, session_cookie, monkeypa
     assert seen["fields"]["enrichment_mode"] == "linkedin"
 
 
+def test_schedule_page_renders_batches_and_recent(client, session_cookie, monkeypatch):
+    """The Schedule page projects the approved queue into batches (with the
+    recipient + mailbox) and lists recent sends."""
+    import datetime as _dt
+
+    async def approved_unsent_queue(campaign_id=None, limit=500):
+        return [{"id": 1, "email": "jane@x.com", "first_name": "Jane",
+                 "last_name": "Doe", "company": "Doe Co", "campaign_id": 1,
+                 "campaign_name": "Warmup", "pinned_sender_id": None}]
+
+    async def active_senders_in_rotation_order():
+        return [{"id": 1, "sender_email": "a@d1.com", "sender_name": "A"}]
+
+    async def recent_sends(campaign_id=None, limit=100):
+        return [{"id": 2, "email": "sam@x.com", "first_name": "Sam",
+                 "last_name": "Ray", "company": "Ray Co", "campaign_name": "Warmup",
+                 "email_sent_at": _dt.datetime(2026, 8, 19, 14, 0,
+                                               tzinfo=_dt.timezone.utc),
+                 "sender_email": "a@d1.com"}]
+
+    async def list_campaigns():
+        return [{"id": 1, "name": "Warmup", "contacts": 1}]
+
+    monkeypatch.setattr(repo, "approved_unsent_queue", approved_unsent_queue)
+    monkeypatch.setattr(repo, "active_senders_in_rotation_order",
+                        active_senders_in_rotation_order)
+    monkeypatch.setattr(repo, "recent_sends", recent_sends)
+    monkeypatch.setattr(repo, "list_campaigns", list_campaigns)
+
+    body = client.get("/ui/schedule", cookies=session_cookie).text
+    assert "Send schedule" in body
+    assert "jane@x.com" in body      # upcoming batch recipient
+    assert "a@d1.com" in body        # projected From mailbox
+    assert "sam@x.com" in body       # recent send
+
+
 def test_send_now_sends_and_redirects_with_count(client, session_cookie, monkeypatch):
     """The per-campaign override calls emailer.send_campaign_now for that id and
     redirects back with the number sent (surfaced as a flash)."""

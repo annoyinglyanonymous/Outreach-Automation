@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Schedule — Outreach{% endblock %}
+{% block crumb %}Schedule{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Send schedule</h1>
+    <p class="hint">The business-hours drip made visible: one batch of up to
+    <strong>{{ batch_size }}</strong> (one email per active mailbox) every
+    {{ interval }} minutes, {{ '%02d'|format(start_hour) }}:00–{{ '%02d'|format(end_hour) }}:00
+    {{ tz }}{{ ' on weekdays' if weekdays_only else '' }}.
+    <strong>{{ queue_total }}</strong> approved email{{ '' if queue_total == 1 else 's' }}
+    waiting. Times are estimates — they shift with pauses, failures, and sender changes.</p>
+  </div>
+  <form method="get" action="/ui/schedule" class="row-actions">
+    <label>Campaign
+      <select name="campaign" onchange="this.form.submit()">
+        <option value="">All campaigns</option>
+        {% for c in campaigns %}
+        <option value="{{ c.id }}" {% if selected_campaign == c.id %}selected{% endif %}>{{ c.name }}</option>
+        {% endfor %}
+      </select></label>
+  </form>
+</div>
+
+{% if not senders %}
+<p class="flash warn">No active senders — nothing will send until a mailbox is active on the
+  <a href="/ui/senders">Senders</a> page.</p>
+{% elif not drip_active %}
+<p class="flash warn">Automatic sending is off (the scheduler or the send window is disabled),
+  so these batches go out only when you trigger a send. Grouping is shown without times.</p>
+{% endif %}
+
+<section class="card flush">
+  <div class="card-head"><h2>Upcoming batches</h2></div>
+  {% if not batches %}
+  <p class="empty" style="padding:16px">No approved emails are waiting to send.</p>
+  {% else %}
+  {% for b in batches %}
+  <div style="border-top:1px solid var(--border, #e5e7eb); padding:14px 16px">
+    <div style="display:flex; justify-content:space-between; align-items:baseline; gap:12px; margin-bottom:8px">
+      <strong>Batch {{ b.index }}</strong>
+      <span class="sub">{{ b.at_label or 'on next manual trigger' }} ·
+        {{ b.contacts | length }} email{{ '' if b.contacts|length == 1 else 's' }}</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Recipient</th><th>Company</th><th>Campaign</th><th>From mailbox</th></tr></thead>
+        <tbody>
+          {% for c in b.contacts %}
+          <tr>
+            <td>{{ ((c.first_name or '') ~ ' ' ~ (c.last_name or '')) | trim or '—' }}
+              <span class="sub" style="display:block">{{ c.email }}</span></td>
+            <td>{{ c.company or '—' }}</td>
+            <td>{{ c.campaign_name }}</td>
+            <td>{{ c.mailbox or '— (no active sender)' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endfor %}
+  {% if queue_total >= 500 %}
+  <p class="hint" style="padding:0 16px 16px">Showing the first 500 approved contacts.</p>
+  {% endif %}
+  {% endif %}
+</section>
+
+<section class="card flush" style="margin-top:24px">
+  <div class="card-head"><h2>Recent sends</h2></div>
+  {% if not recent %}
+  <p class="empty" style="padding:16px">Nothing sent yet.</p>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Sent</th><th>Recipient</th><th>Campaign</th><th>From mailbox</th></tr></thead>
+      <tbody>
+        {% for r in recent %}
+        <tr>
+          <td>{{ r.sent_label }}</td>
+          <td>{{ ((r.first_name or '') ~ ' ' ~ (r.last_name or '')) | trim or '—' }}
+            <span class="sub" style="display:block">{{ r.email }}</span></td>
+          <td>{{ r.campaign_name }}</td>
+          <td>{{ r.sender_email or '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

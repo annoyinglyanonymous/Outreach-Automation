@@ -221,8 +221,9 @@ async def _send_batch(
             return False
 
         # Written immediately — never batched — so a crash cannot lose
-        # more than the one in-flight send.
-        await repo.mark_email_sent(target.id, sender.name, ref)
+        # more than the one in-flight send. Record the From that was drawn so
+        # the Schedule log can group sends by mailbox.
+        await repo.mark_email_sent(target.id, sender.name, ref, target.sender_email)
         stats.sent += 1
 
     return True

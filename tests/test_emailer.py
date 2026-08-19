@@ -112,8 +112,9 @@ def state(monkeypatch):
     async def count_active_senders():
         return s["active_count"]
 
-    async def mark_email_sent(cid, provider, ref):
+    async def mark_email_sent(cid, provider, ref, sender_email=None):
         s["ops"].append(f"mark:{cid}:{ref}")
+        s.setdefault("sent_from", []).append((cid, sender_email))
         return True
 
     async def mark_email_failed(cid, provider, reason):
@@ -331,6 +332,18 @@ async def test_every_send_rotates_the_from_through_the_pool(state):
     await emailer.run(cap)
 
     assert cap.seen == [(1, "a@d1.com", "A"), (2, "b@d2.com", "B")]
+
+
+@pytest.mark.asyncio
+async def test_the_sent_mailbox_is_recorded(state):
+    """The From the rotation drew is passed to mark_email_sent, so the Schedule
+    log can show which mailbox each email went from."""
+    state["pool"] = [{"sender_email": "a@d1.com", "sender_name": "A"}]
+    state["claims"] = [[target(1)]]
+
+    await emailer.run(FakeSender(state["ops"], ["r1"]))
+
+    assert state["sent_from"] == [(1, "a@d1.com")]
 
 
 @pytest.mark.asyncio

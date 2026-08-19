@@ -185,6 +185,27 @@ def test_email_claim_can_scope_to_one_campaign():
     assert "$2::bigint IS NULL" in sql
 
 
+def test_schedule_queries_mirror_the_claim_and_carry_the_mailbox():
+    """The Schedule forecast reads the approved-unsent queue in the SAME order
+    and with the same sendable predicate the claim uses (minus sender capacity,
+    surfaced on the page), and the recent-sends log pulls the From mailbox from
+    the email_sent event."""
+    q = repo.APPROVED_UNSENT_SQL
+    assert "email_status = 'drafted'" in q
+    assert "review_status = 'approved'" in q
+    assert "g.status = 'active'" in q
+    assert "FROM suppression s" in q
+    assert "ORDER BY c.created_at" in q          # the claim order
+    assert "payload->>'sender'" in repo.RECENT_SENDS_SQL
+    assert "email_status = 'sent_email'" in repo.RECENT_SENDS_SQL
+
+
+def test_mark_email_sent_records_the_sender_mailbox():
+    """The From is stored on the email_sent event so the log can group by
+    mailbox (older sends, before this, read as unknown)."""
+    assert "'sender', $4::text" in repo.MARK_EMAIL_SENT_SQL
+
+
 def test_unsendable_report_names_an_empty_pool_not_a_capped_one():
     """An empty pool is a permanent misconfig worth naming; a merely-capped
     pool is transient pacing and must NOT show as unsendable — so the
